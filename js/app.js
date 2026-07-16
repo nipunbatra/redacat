@@ -11,6 +11,8 @@ const els = {
   undo: $("undo"), clear: $("clear"), newfile: $("newfile"), download: $("download"),
   toolnote: $("toolnote"), cv: $("cv"), status: $("status"),
   busy: $("busy"), busytext: $("busytext"),
+  searchbar: $("searchbar"), searchtext: $("searchtext"),
+  searchbtn: $("searchbtn"), searchinfo: $("searchinfo"),
 };
 
 const ctx = els.cv.getContext("2d");
@@ -22,9 +24,11 @@ const state = {
   mupdf: null,
   doc: null,
   pdfBytes: null,        // pristine copy of the loaded PDF
+  pdfPassword: null,     // remembered so export can reopen the file
   pageCount: 1,
   pageIndex: 0,
-  pages: [],             // pdf page cache: {bitmap, scale, cw, ch, bounds}
+  pages: [],             // pdf page render cache: ImageBitmap per page
+  meta: [],              // pdf page geometry cache: {bounds, scale}, frozen per page at first touch
   rects: [[]],           // per-page marks: {x,y,w,h,mode,strength} in content px
   undoStack: [],
   tool: "black",
@@ -53,16 +57,14 @@ function busy(text) {
 function unbusy() { els.busy.hidden = true; }
 
 function content() {
-  if (state.kind === "image") return { cw: state.base.width, ch: state.base.height };
-  const p = state.pages[state.pageIndex];
-  return { cw: p.cw, ch: p.ch };
+  const src = state.kind === "image" ? state.base : state.pages[state.pageIndex];
+  return { cw: src.width, ch: src.height };
 }
 
 function marks() { return state.rects[state.pageIndex]; }
 
 function baseSource() {
-  if (state.kind === "image") return state.base;
-  return state.pages[state.pageIndex].bitmap;
+  return state.kind === "image" ? state.base : state.pages[state.pageIndex];
 }
 
 function download(blob, name) {
@@ -93,7 +95,12 @@ function pixelateRegion(target, src, r, cell) {
   const sh = Math.max(1, Math.round(r.h / cell));
   const t = document.createElement("canvas");
   t.width = sw; t.height = sh;
-  t.getContext("2d").drawImage(src, r.x, r.y, r.w, r.h, 0, 0, sw, sh);
+  const tc = t.getContext("2d");
+  // high-quality downsampling averages each cell; the default can pass
+  // near-original colors through, which weakens the mosaic
+  tc.imageSmoothingEnabled = true;
+  tc.imageSmoothingQuality = "high";
+  tc.drawImage(src, r.x, r.y, r.w, r.h, 0, 0, sw, sh);
   target.save();
   target.imageSmoothingEnabled = false;
   target.drawImage(t, 0, 0, sw, sh, r.x, r.y, r.w, r.h);
@@ -248,12 +255,16 @@ els.cv.addEventListener("pointerup", (e) => {
     return;
   }
   if (r.w < 3 || r.h < 3) { render(); return; }
-  const mark = { ...r, mode: state.tool, strength: state.strength };
-  marks().push(mark);
-  state.undoStack.push({ type: "add", page: state.pageIndex });
   state.selected = null;
-  refresh();
+  addMarkAt(state.pageIndex, { ...r, mode: state.tool, strength: state.strength });
 });
+
+// single entry point for adding a mark, shared by the pointer path and tests
+function addMarkAt(pageIdx, mark) {
+  state.rects[pageIdx].push(mark);
+  state.undoStack.push({ type: "add", page: pageIdx });
+  if (pageIdx === state.pageIndex) refresh(); else updateStatus();
+}
 
 /* ---------- toolbar ---------- */
 
@@ -292,9 +303,13 @@ function doUndo() {
     state.rects[op.page].splice(op.index, 0, op.mark);
   } else if (op.type === "clear") {
     state.rects[op.page] = op.marks;
+  } else if (op.type === "add-many") {
+    for (const [pg, count] of op.pages) state.rects[pg].splice(-count, count);
+    els.searchinfo.textContent = "";
   }
   state.selected = null;
-  if (op.page !== state.pageIndex) gotoPage(op.page);
+  const target = op.type === "add-many" ? op.pages[0][0] : op.page;
+  if (target !== state.pageIndex) gotoPage(target);
   else refresh();
 }
 
@@ -324,35 +339,59 @@ window.addEventListener("keydown", (e) => {
 
 /* ---------- pages ---------- */
 
-async function renderPage(i) {
-  if (state.pages[i]) return;
-  const page = state.doc.loadPage(i);
-  const bounds = page.getBounds();
-  const pw = bounds[2] - bounds[0];
+// page geometry without rendering — search and export need this for unvisited pages.
+// The scale is measured from the live window at the FIRST touch of each page
+// (so late-visited pages render sharp after a resize) and frozen after that
+// (so stored mark coordinates on the page stay valid).
+function computeMeta(doc, i) {
+  const bounds = doc.loadPage(i).getBounds();
+  const pw = Math.max(1, bounds[2] - bounds[0]);
   const dpr = window.devicePixelRatio || 1;
-  const wrapW = Math.min(958, els.editor.clientWidth || 958);
-  const scale = Math.min(3, Math.max(1, (wrapW * dpr * 1.25) / pw));
-  const pix = page.toPixmap(
+  const mainW = document.querySelector("main").clientWidth;
+  const refWidth = Math.min(958, mainW || 958) * dpr * 1.25;
+  return { bounds, scale: Math.min(3, Math.max(1, refWidth / pw)) };
+}
+
+function ensureMeta(i) {
+  if (!state.meta[i]) state.meta[i] = computeMeta(state.doc, i);
+  return state.meta[i];
+}
+
+async function rasterize(doc, i, scale) {
+  const pix = doc.loadPage(i).toPixmap(
     state.mupdf.Matrix.scale(scale, scale),
     state.mupdf.ColorSpace.DeviceRGB, false, true,
   );
   const png = pix.asPNG();
   pix.destroy();
-  const bitmap = await createImageBitmap(new Blob([png], { type: "image/png" }));
-  state.pages[i] = { bitmap, scale, cw: bitmap.width, ch: bitmap.height, bounds };
+  return createImageBitmap(new Blob([png], { type: "image/png" }));
+}
+
+async function renderPage(i) {
+  if (!state.pages[i]) state.pages[i] = await rasterize(state.doc, i, ensureMeta(i).scale);
+}
+
+function updatePager() {
+  els.pageinfo.textContent = `${state.pageIndex + 1} / ${state.pageCount}`;
+  els.prev.disabled = state.pageIndex === 0;
+  els.next.disabled = state.pageIndex === state.pageCount - 1;
 }
 
 async function gotoPage(i) {
   if (i < 0 || i >= state.pageCount) return;
-  state.pageIndex = i;
-  state.selected = null;
   if (!state.pages[i]) {
     await busy(`rendering page ${i + 1}…`);
-    try { await renderPage(i); } finally { unbusy(); }
+    try { await renderPage(i); }
+    catch (err) {
+      unbusy();
+      alert(`Couldn't render page ${i + 1}.\n\n${err.message || err}`);
+      return; // stay on the current page
+    }
+    unbusy();
   }
-  els.pageinfo.textContent = `${i + 1} / ${state.pageCount}`;
-  els.prev.disabled = i === 0;
-  els.next.disabled = i === state.pageCount - 1;
+  state.pageIndex = i;
+  state.selected = null;
+  updatePager();
   layoutCanvas();
   refresh();
 }
@@ -360,28 +399,113 @@ async function gotoPage(i) {
 els.prev.addEventListener("click", () => gotoPage(state.pageIndex - 1));
 els.next.addEventListener("click", () => gotoPage(state.pageIndex + 1));
 
+/* ---------- find text & redact (PDF) ---------- */
+
+// A redaction tool must never silently under-redact: if a page has more
+// matches than we ask mupdf for, abort the whole operation and say so.
+const SEARCH_MAX_HITS = 5000;
+
+async function searchAndMark(needle) {
+  needle = needle.trim();
+  if (!needle || state.kind !== "pdf") return { hits: 0, pages: 0 };
+  const tool = state.tool === "erase" ? "erase" : "black";
+  await busy(`finding “${needle}”…`);
+  // phase 1: collect matches — fallible, touches no state
+  const found = []; // [pageIndex, rects[]]
+  let hits = 0;
+  try {
+    for (let i = 0; i < state.pageCount; i++) {
+      const results = state.doc.loadPage(i).search(needle, SEARCH_MAX_HITS);
+      if (!results.length) continue;
+      if (results.length >= SEARCH_MAX_HITS) {
+        throw new Error(`Page ${i + 1} has ${SEARCH_MAX_HITS} or more matches — too many to mark reliably. Nothing was marked; try a more specific search.`);
+      }
+      const { bounds, scale } = ensureMeta(i);
+      const pad = 1.5 * scale;
+      const rects = [];
+      for (const quads of results) {
+        hits++;
+        // a hit that wraps across lines yields one quad per line — mark each
+        for (const q of quads) {
+          const xs = [q[0], q[2], q[4], q[6]];
+          const ys = [q[1], q[3], q[5], q[7]];
+          rects.push({
+            x: (Math.min(...xs) - bounds[0]) * scale - pad,
+            y: (Math.min(...ys) - bounds[1]) * scale - pad,
+            w: (Math.max(...xs) - Math.min(...xs)) * scale + 2 * pad,
+            h: (Math.max(...ys) - Math.min(...ys)) * scale + 2 * pad,
+            mode: tool,
+            strength: state.strength,
+          });
+        }
+      }
+      found.push([i, rects]);
+    }
+  } catch (err) {
+    unbusy();
+    alert(`Search failed — no marks were added.\n\n${err.message || err}`);
+    return { hits: 0, pages: 0, failed: true };
+  }
+  unbusy();
+  // phase 2: commit — pure state mutation, cannot fail halfway
+  if (found.length) {
+    for (const [i, rects] of found) state.rects[i].push(...rects);
+    state.undoStack.push({ type: "add-many", pages: found.map(([i, r]) => [i, r.length]) });
+    state.selected = null;
+    const first = found[0][0];
+    if (first !== state.pageIndex) await gotoPage(first);
+    else refresh();
+  }
+  return { hits, pages: found.length };
+}
+
+let searchRunning = false;
+async function runSearch() {
+  if (searchRunning) return; // the busy overlay blocks clicks but not key-repeat
+  searchRunning = true;
+  els.searchbtn.disabled = true;
+  try {
+    const res = await searchAndMark(els.searchtext.value);
+    els.searchinfo.textContent = res.failed ? "search failed — nothing marked"
+      : !els.searchtext.value.trim() ? ""
+      : res.hits === 0 ? "no matches"
+      : `marked ${res.hits} match${res.hits === 1 ? "" : "es"} on ${res.pages} page${res.pages === 1 ? "" : "s"}`;
+  } finally {
+    searchRunning = false;
+    els.searchbtn.disabled = false;
+  }
+}
+
+els.searchbtn.addEventListener("click", runSearch);
+els.searchtext.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); runSearch(); }
+});
+
 /* ---------- file loading ---------- */
 
 async function loadFile(file) {
   const name = file.name || "pasted-image.png";
   const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(name);
-  // the editor must be visible before layout runs, or the canvas measures 0 wide
-  els.intro.hidden = true;
-  els.editor.hidden = false;
   try {
     if (isPdf) await openPdf(file, name);
     else await openImage(file, name);
   } catch (err) {
     unbusy();
-    resetDoc();
-    state.kind = null;
-    els.editor.hidden = true;
-    els.intro.hidden = false;
     alert(`Couldn't open that file.\n\n${err.message || err}`);
-    return;
+    return; // nothing was torn down — whatever was open before stays open
   }
+  showEditor(name);
+}
+
+// switch the UI to the editor — only after a successful open
+function showEditor(name) {
+  els.intro.hidden = true;
+  els.editor.hidden = false;
   els.fname.textContent = name;
   els.fname.title = name;
+  els.searchbar.hidden = state.kind !== "pdf";
+  els.searchtext.value = "";
+  els.searchinfo.textContent = "";
   // show only the tools that apply to this file kind
   let firstVisible = null;
   for (const b of els.tools.querySelectorAll(".tool")) {
@@ -390,15 +514,22 @@ async function loadFile(file) {
     if (show && !firstVisible) firstVisible = b;
   }
   firstVisible.click();
+  if (state.kind === "pdf") updatePager();
+  layoutCanvas();
+  refresh();
   window.scrollTo({ top: 0 });
 }
 
 function resetDoc() {
   if (state.doc) { try { state.doc.destroy(); } catch {} }
+  for (const p of state.pages) { try { p?.close?.(); } catch {} }
+  if (state.base?.close) { try { state.base.close(); } catch {} }
   state.doc = null;
   state.base = null;
   state.pdfBytes = null;
+  state.pdfPassword = null;
   state.pages = [];
+  state.meta = [];
   state.rects = [[]];
   state.undoStack = [];
   state.selected = null;
@@ -432,8 +563,6 @@ async function openImage(source, name) {
   state.base = bitmap;
   els.pager.hidden = true;
   unbusy();
-  layoutCanvas();
-  refresh();
 }
 
 async function loadEngine() {
@@ -447,21 +576,43 @@ async function openPdf(file, name) {
   await busy("opening pdf…");
   const bytes = new Uint8Array(await file.arrayBuffer());
   const doc = state.mupdf.Document.openDocument(bytes.slice(), "application/pdf");
-  if (doc.needsPassword()) {
-    doc.destroy();
-    throw new Error("Password-protected PDFs aren't supported yet.");
+  // every fallible step runs BEFORE the current document is torn down, so a
+  // failed open can never leave half-swapped state or lose existing marks
+  let password = null, pageCount, meta0, bitmap0;
+  try {
+    if (doc.needsPassword()) {
+      unbusy();
+      for (let attempt = 0; ; attempt++) {
+        if (attempt >= 3) throw new Error("Wrong password (3 attempts).");
+        const pw = window.prompt(attempt === 0
+          ? "This PDF is password-protected. Enter the password to open it:"
+          : "Wrong password — try again:");
+        if (pw === null) throw new Error("A password is required to open this PDF.");
+        if (doc.authenticatePassword(pw) !== 0) { password = pw; break; }
+      }
+      await busy("opening pdf…");
+    }
+    pageCount = doc.countPages();
+    if (pageCount === 0) throw new Error("This PDF has no pages.");
+    meta0 = computeMeta(doc, 0);
+    bitmap0 = await rasterize(doc, 0, meta0.scale);
+  } catch (err) {
+    try { doc.destroy(); } catch {}
+    throw err;
   }
+  // commit — pure assignments from here on
   resetDoc();
   state.kind = "pdf";
   state.filename = name;
   state.doc = doc;
   state.pdfBytes = bytes;
-  state.pageCount = doc.countPages();
-  state.rects = Array.from({ length: state.pageCount }, () => []);
-  els.pager.hidden = state.pageCount === 1;
-  await renderPage(0);
+  state.pdfPassword = password;
+  state.pageCount = pageCount;
+  state.rects = Array.from({ length: pageCount }, () => []);
+  state.meta[0] = meta0;
+  state.pages[0] = bitmap0;
+  els.pager.hidden = pageCount === 1;
   unbusy();
-  await gotoPage(0);
 }
 
 /* ---------- export ---------- */
@@ -493,10 +644,11 @@ function exportPdf() {
   // work on a fresh copy so the on-screen document stays editable
   const doc = mupdf.Document.openDocument(state.pdfBytes.slice(), "application/pdf");
   try {
+    if (doc.needsPassword()) doc.authenticatePassword(state.pdfPassword ?? "");
     for (let i = 0; i < state.pageCount; i++) {
       const list = state.rects[i];
       if (!list || !list.length) continue;
-      const info = state.pages[i];
+      const info = ensureMeta(i);
       const page = doc.loadPage(i);
       // erase marks leave blank paper; bar marks paint black boxes — both delete content
       for (const pass of [{ mode: "erase", black: false }, { mode: "black", black: true }]) {
@@ -520,7 +672,11 @@ function exportPdf() {
         );
       }
     }
-    const buf = doc.saveToBuffer("garbage=2,compress=yes");
+    // keep the original encryption (and password) on protected files
+    const opts = state.pdfPassword != null
+      ? "garbage=2,compress=yes,encrypt=keep"
+      : "garbage=2,compress=yes";
+    const buf = doc.saveToBuffer(opts);
     return new Blob([buf.asUint8Array().slice()], { type: "application/pdf" });
   } finally {
     try { doc.destroy(); } catch {}
@@ -574,7 +730,7 @@ window.addEventListener("resize", () => {
 
 /* ---------- sample memo (generated locally, obviously fake) ---------- */
 
-els.sample.addEventListener("click", (e) => {
+els.sample.addEventListener("click", async (e) => {
   e.stopPropagation();
   const c = document.createElement("canvas");
   c.width = 1200; c.height = 820;
@@ -609,10 +765,20 @@ els.sample.addEventListener("click", (e) => {
   g.fillStyle = "#b3261e"; g.font = "700 44px ui-monospace, Menlo, monospace";
   g.textAlign = "center"; g.fillText("SAMPLE", 0, 16);
   g.restore();
-  els.intro.hidden = true;
-  els.editor.hidden = false;
-  els.fname.textContent = "sample-memo.png";
-  for (const b of els.tools.querySelectorAll(".tool")) b.hidden = !b.dataset.for.includes("image");
-  els.tools.querySelector('[data-tool="black"]').click();
-  openImage(c, "sample-memo.png");
+  await openImage(c, "sample-memo.png");
+  showEditor("sample-memo.png");
 });
+
+/* ---------- test hook (harmless in production: everything is client-side anyway) ---------- */
+
+window.__redacat = {
+  state,
+  refresh,
+  loadFile,
+  searchAndMark,
+  exportPdf,
+  addMark: (pageIdx, m) => addMarkAt(pageIdx, { mode: "black", strength: state.strength, ...m }),
+  compositeDataURL: () => state.composite.toDataURL(),
+  meta: (i) => ensureMeta(i),
+  gotoPage,
+};

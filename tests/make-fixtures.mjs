@@ -1,0 +1,132 @@
+// Generates the PDF fixture zoo in tests/fixtures/.
+// Deliberately awkward files: rotated pages, CropBox offsets, encryption,
+// embedded images, zero pages, corrupt bytes, multi-page secrets.
+import { PDFDocument, StandardFonts, rgb, degrees } from "pdf-lib";
+import * as mupdf from "mupdf";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+
+// Deliberately fake password for the generated, gitignored test PDF.
+// Not a credential for anything — do not "rotate", there is nothing to rotate.
+export const FIXTURE_PW = "fake-test-password-not-a-real-secret";
+
+const DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
+fs.mkdirSync(DIR, { recursive: true });
+const write = (name, bytes) => {
+  fs.writeFileSync(path.join(DIR, name), bytes);
+  console.log("wrote", name, bytes.length, "bytes");
+};
+
+async function newDoc() {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  return { doc, font };
+}
+
+// ---- basic.pdf: 2 pages, one secret per page at known coordinates ----
+{
+  const { doc, font } = await newDoc();
+  const p1 = doc.addPage([612, 792]);
+  p1.drawText("PAGE ONE HEADER", { x: 72, y: 720, size: 20, font });
+  p1.drawText("TOP-SECRET-ALPHA", { x: 72, y: 600, size: 14, font }); // fitz y = 792-600 = 192
+  p1.drawText("public line one stays", { x: 72, y: 560, size: 14, font });
+  const p2 = doc.addPage([612, 792]);
+  p2.drawText("TOP-SECRET-BRAVO", { x: 72, y: 700, size: 14, font }); // fitz y = 92
+  p2.drawText("public line two stays", { x: 72, y: 660, size: 14, font });
+  write("basic.pdf", await doc.save());
+}
+
+// ---- rotated90.pdf / rotated270.pdf: pages with /Rotate set ----
+for (const rot of [90, 270]) {
+  const { doc, font } = await newDoc();
+  const p = doc.addPage([612, 792]);
+  p.setRotation(degrees(rot));
+  p.drawText(`ROTATE-SECRET-${rot}`, { x: 100, y: 400, size: 16, font });
+  p.drawText("rotated public text", { x: 100, y: 300, size: 16, font });
+  write(`rotated${rot}.pdf`, await doc.save());
+}
+
+// ---- cropbox.pdf: CropBox smaller than and offset from MediaBox ----
+{
+  const { doc, font } = await newDoc();
+  const p = doc.addPage([612, 792]);
+  p.setCropBox(50, 100, 350, 400); // x, y, w, h from bottom-left
+  p.drawText("CROP-SECRET-KILO", { x: 100, y: 350, size: 14, font });
+  p.drawText("crop public text", { x: 100, y: 300, size: 14, font });
+  write("cropbox.pdf", await doc.save());
+}
+
+// ---- fivepages.pdf: secrets scattered on pages 1, 3, 5 (twice on 3) ----
+{
+  const { doc, font } = await newDoc();
+  for (let i = 1; i <= 5; i++) {
+    const p = doc.addPage([612, 792]);
+    p.drawText(`Page ${i} public content`, { x: 72, y: 700, size: 14, font });
+    if (i === 1) p.drawText("MULTI-SECRET here", { x: 72, y: 600, size: 14, font });
+    if (i === 3) {
+      p.drawText("first MULTI-SECRET on page three", { x: 72, y: 600, size: 14, font });
+      p.drawText("second MULTI-SECRET on page three", { x: 72, y: 560, size: 14, font });
+    }
+    if (i === 5) p.drawText("MULTI-SECRET again", { x: 72, y: 500, size: 14, font });
+  }
+  write("fivepages.pdf", await doc.save());
+}
+
+// ---- imagepdf.pdf: an embedded raster image plus a caption ----
+{
+  // make a small colorful PNG by rendering a vector page through mupdf
+  const { doc: tmp } = await newDoc();
+  const tp = tmp.addPage([64, 64]);
+  tp.drawRectangle({ x: 0, y: 0, width: 64, height: 64, color: rgb(0.9, 0.2, 0.1) });
+  tp.drawRectangle({ x: 32, y: 0, width: 32, height: 64, color: rgb(0.1, 0.3, 0.9) });
+  const tmpDoc = mupdf.Document.openDocument(await tmp.save(), "application/pdf");
+  const pix = tmpDoc.loadPage(0).toPixmap(mupdf.Matrix.scale(4, 4), mupdf.ColorSpace.DeviceRGB, false, true);
+  const pngBytes = pix.asPNG();
+
+  const { doc, font } = await newDoc();
+  const png = await doc.embedPng(pngBytes);
+  const p = doc.addPage([612, 792]);
+  // image occupies x 100..400, pdf y 400..700  => fitz y 92..392
+  p.drawImage(png, { x: 100, y: 400, width: 300, height: 300 });
+  p.drawText("image caption text", { x: 100, y: 360, size: 14, font });
+  write("imagepdf.pdf", await doc.save());
+}
+
+// ---- protected.pdf: AES-128, locked with the fake fixture password ----
+{
+  const basic = fs.readFileSync(path.join(DIR, "basic.pdf"));
+  const doc = mupdf.Document.openDocument(basic, "application/pdf");
+  const out = doc.saveToBuffer(`encrypt=aes-128,user-password=${FIXTURE_PW},owner-password=${FIXTURE_PW},permissions=-4`);
+  write("protected.pdf", out.asUint8Array());
+  const check = mupdf.Document.openDocument(out.asUint8Array().slice(), "application/pdf");
+  if (!check.needsPassword()) throw new Error("protected.pdf is not actually encrypted!");
+  if (check.authenticatePassword(FIXTURE_PW) === 0) throw new Error("password mismatch");
+}
+
+// ---- corrupt.pdf: deterministic garbage bytes ----
+{
+  const junk = Buffer.alloc(4096);
+  for (let i = 0; i < junk.length; i++) junk[i] = (i * 197 + 13) & 0xff;
+  write("corrupt.pdf", junk);
+}
+
+// ---- zeropage.pdf: structurally valid, zero pages ----
+{
+  const raw = `%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [] /Count 0 >>
+endobj
+trailer
+<< /Size 3 /Root 1 0 R >>
+%%EOF
+`;
+  write("zeropage.pdf", Buffer.from(raw, "latin1"));
+  const check = mupdf.Document.openDocument(fs.readFileSync(path.join(DIR, "zeropage.pdf")), "application/pdf");
+  console.log("zeropage.pdf opens with", check.countPages(), "pages (want 0)");
+}
+
+console.log("fixtures done.");

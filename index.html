@@ -104,6 +104,13 @@
     </div>
   </div>
 
+  <div class="searchbar" id="searchbar" hidden>
+    <input type="search" id="searchtext" class="mono" placeholder="find text to redact — e.g. a name, an email…"
+           aria-label="Text to find and redact">
+    <button class="btn" id="searchbtn" type="button">redact all matches</button>
+    <span id="searchinfo" class="mono" role="status"></span>
+  </div>
+
   <p id="toolnote" class="note mono" hidden></p>
 
   <div class="canvas-wrap sheet">

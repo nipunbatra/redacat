@@ -1,0 +1,14 @@
+{
+  "name": "redacat-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "fixtures": "node make-fixtures.mjs",
+    "test": "node run-tests.mjs"
+  },
+  "dependencies": {
+    "mupdf": "1.28.0",
+    "pdf-lib": "^1.17.1",
+    "puppeteer-core": "^23.0.0"
+  }
+}

@@ -32,6 +32,13 @@ the text in the file (the classic lift-the-box leak). Redacat does neither.
 | ▢ white-out | images | correction-fluid white fill |
 | ⌫ erase | PDFs | deletes content underneath, leaving blank paper |
 
+**Find & redact:** for PDFs, type any text (a name, an email, an ID) and mark
+every occurrence across all pages in one click — matches on pages you never
+even scrolled to are still properly redacted.
+
+**Password-protected PDFs** open normally (you'll be asked for the password)
+and the redacted copy keeps the same encryption and password.
+
 Other niceties: paste a screenshot straight from the clipboard (⌘V), drag &
 drop, multi-page PDFs, undo (⌘Z), click a mark + `⌫` to remove it, and a
 built-in fake sample memo to try it on.
@@ -61,6 +68,25 @@ and the one webfont is self-hosted. The site makes zero external requests.
 3. `applyRedactions()` removes text (`REDACT_TEXT_REMOVE`), image regions
    (`REDACT_IMAGE_PIXELS`), and covered line art, then the file is saved with
    garbage collection (`garbage=2`) so removed objects don't linger.
+
+## Tests
+
+A headless-Chrome end-to-end suite drives the real UI against a local server
+and verifies exports **byte-by-byte** with mupdf in Node — including that
+redacted text is absent from the raw bytes of the output file. The fixture zoo
+covers rotated pages (90°/270°), CropBox-offset pages, AES-encrypted PDFs
+(wrong password, cancel, and round-trip re-encryption), embedded-image
+scrubbing, zero-page and corrupt files, EXIF-rotated JPEGs, alpha-channel
+PNGs, WebP, marks at canvas corners, and undo/redo state machines. It runs on
+every push via GitHub Actions.
+
+```sh
+cd tests
+npm install
+node make-fixtures.mjs
+node run-tests.mjs                 # local checkout
+BASE=https://nipunbatra.github.io/redacat/ node run-tests.mjs   # live site
+```
 
 ## License
 

@@ -1,0 +1,28 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: browser-actions/setup-chrome@v1
+        id: chrome
+      - name: Install test dependencies
+        working-directory: tests
+        run: npm install
+      - name: Generate fixtures
+        working-directory: tests
+        run: node make-fixtures.mjs
+      - name: Run end-to-end suite
+        working-directory: tests
+        run: node run-tests.mjs
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
