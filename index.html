@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; font-src 'self'; img-src 'self' blob: data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="description" content="Redacat — redact images and PDFs entirely in your browser. True redaction (content is deleted, not covered), powered by WebAssembly. No uploads, no servers, no analytics.">
+<title>Redacat — redact images &amp; PDFs, nothing leaves your device</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header class="top">
+  <a class="brand" href="./" aria-label="Redacat home">
+    <svg class="mark" viewBox="0 0 120 52" aria-hidden="true" focusable="false">
+      <polygon points="8,27 17,4 29,27" fill="currentColor"/>
+      <polygon points="33,27 42,4 54,27" fill="currentColor"/>
+      <rect x="2" y="25" width="100" height="24" rx="4" fill="currentColor"/>
+      <circle cx="19" cy="37" r="3.6" fill="var(--paper)"/>
+      <circle cx="44" cy="37" r="3.6" fill="var(--paper)"/>
+      <path d="M100 45 C114 43 116 27 102 25" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round"/>
+    </svg>
+    <span class="wordmark">Redacat</span>
+  </a>
+  <div class="stamp" role="note" aria-label="100 percent local, no uploads ever">
+    100% local
+    <span>no uploads · ever</span>
+  </div>
+  <a class="srclink mono" href="https://github.com/nipunbatra/redacat">source ↗</a>
+</header>
+
+<main>
+
+<section id="intro">
+  <h1>Black it out.<br>
+    <span class="redacted-word"><span class="unbar" aria-hidden="true"></span>Nothing</span> leaves your&nbsp;device.
+  </h1>
+  <p class="lede">Redacat redacts images and PDFs entirely in your browser, using WebAssembly.
+  In PDFs the covered text is <em>deleted from the file</em>, not hidden behind a box.
+  No uploads, no servers, no analytics — it even works offline.</p>
+
+  <div id="drop" class="sheet dropzone" tabindex="0" role="button" aria-label="Choose an image or PDF to redact">
+    <input type="file" id="file" accept="image/png,image/jpeg,image/webp,application/pdf,.pdf" hidden>
+    <div class="drop-inner">
+      <div class="drop-title mono">drop an image or pdf</div>
+      <div class="drop-sub mono">or click to browse — png · jpeg · webp · pdf</div>
+      <button id="sample" class="btn ghost" type="button">try the sample memo</button>
+    </div>
+  </div>
+
+  <section class="facts" aria-label="How Redacat works">
+    <div class="fact">
+      <h2 class="mono">real redaction</h2>
+      <p>In PDFs, text and graphics under a mark are <strong>removed from the file</strong> by the
+      MuPDF engine — not covered by a rectangle someone can lift off. Images are rebuilt pixel
+      by pixel, and EXIF metadata (location, camera, timestamps) is dropped automatically.</p>
+    </div>
+    <div class="fact">
+      <h2 class="mono">local by design</h2>
+      <p>Everything runs in this tab. A strict Content-Security-Policy forbids all network
+      requests, so the page couldn't phone home even if it wanted to. Load it once and it
+      keeps working in airplane mode.</p>
+    </div>
+    <div class="fact">
+      <h2 class="mono">open source</h2>
+      <p>AGPL-3.0, no build step, a handful of readable files.
+      <a href="https://github.com/nipunbatra/redacat">Audit it, fork it, or self-host it.</a>
+      Redaction engine: MuPDF WebAssembly by Artifex.</p>
+    </div>
+  </section>
+</section>
+
+<section id="editor" hidden>
+  <div class="toolbar">
+    <span id="fname" class="fname mono" title=""></span>
+
+    <div class="group" id="tools" role="toolbar" aria-label="Redaction tools">
+      <button class="btn tool on" data-tool="black"    data-for="image pdf" type="button" aria-pressed="true">█ bar</button>
+      <button class="btn tool"    data-tool="blur"     data-for="image"     type="button" aria-pressed="false">≈ blur</button>
+      <button class="btn tool"    data-tool="pixelate" data-for="image"     type="button" aria-pressed="false">▦ pixelate</button>
+      <button class="btn tool"    data-tool="white"    data-for="image"     type="button" aria-pressed="false">▢ white-out</button>
+      <button class="btn tool"    data-tool="erase"    data-for="pdf"       type="button" aria-pressed="false">⌫ erase</button>
+    </div>
+
+    <label class="strength mono" id="strengthwrap">strength
+      <input type="range" id="strength" min="1" max="10" value="5" aria-label="Blur or pixelation strength">
+    </label>
+
+    <div class="group pager" id="pager" hidden>
+      <button class="btn" id="prev" type="button" aria-label="Previous page">◀</button>
+      <span class="mono" id="pageinfo">1 / 1</span>
+      <button class="btn" id="next" type="button" aria-label="Next page">▶</button>
+    </div>
+
+    <div class="group">
+      <button class="btn" id="undo" type="button">undo</button>
+      <button class="btn" id="clear" type="button">clear page</button>
+    </div>
+
+    <div class="group grow-right">
+      <button class="btn ghost" id="newfile" type="button">✕ close file</button>
+      <button class="btn primary" id="download" type="button">download redacted copy</button>
+    </div>
+  </div>
+
+  <p id="toolnote" class="note mono" hidden></p>
+
+  <div class="canvas-wrap sheet">
+    <canvas id="cv" aria-label="Redaction canvas. Drag to draw a redaction mark."></canvas>
+  </div>
+
+  <div class="statusline mono">
+    <span id="status"></span>
+    <span class="hint">drag to draw · click a mark, then ⌫ to remove · ⌘Z / ctrl+Z to undo</span>
+  </div>
+</section>
+
+</main>
+
+<div id="busy" class="busy" hidden>
+  <div class="busy-card sheet mono" role="status"><span id="busytext">working…</span></div>
+</div>
+
+<footer class="mono">
+  <span>redacat</span> · nothing you open here is sent anywhere ·
+  engine: <a href="https://mupdf.com">MuPDF</a> (AGPL-3.0) ·
+  <a href="https://github.com/nipunbatra/redacat">view source</a>
+</footer>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

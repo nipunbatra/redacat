@@ -1,0 +1,10 @@
+{
+  "name": "redacat",
+  "version": "1.0.0",
+  "description": "Redact images & PDFs entirely in your browser — true redaction via MuPDF WASM, nothing leaves your device.",
+  "license": "AGPL-3.0-or-later",
+  "homepage": "https://nipunbatra.github.io/redacat/",
+  "dependencies": {
+    "mupdf": "1.28.0"
+  }
+}
