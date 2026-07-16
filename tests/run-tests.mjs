@@ -57,9 +57,10 @@ function assertEq(got, want, msg) {
 
 async function newPage(dialogPlan = []) {
   const page = await browser.newPage();
-  const ctx = { page, errors: [], dialogs: [] };
+  const ctx = { page, errors: [], dialogs: [], requests: [] };
   page.on("console", (m) => { if (m.type() === "error") ctx.errors.push(m.text()); });
   page.on("pageerror", (e) => ctx.errors.push(String(e)));
+  page.on("request", (r) => { if (/^https?:/.test(r.url())) ctx.requests.push(r.url()); });
   page.on("dialog", async (d) => {
     ctx.dialogs.push({ type: d.type(), message: d.message() });
     const plan = dialogPlan.shift();
@@ -501,6 +502,146 @@ test("pdf: erase over embedded image really scrubs image pixels", async () => {
   assert(kept[2] > 120 && kept[0] < 120, `remaining image half intact: ${kept}`);
   const [t] = pdfPagesText(bytes);
   assert(t.includes("image caption text"), "caption survives");
+  await page.close();
+});
+
+/* ---------- hostile-input tests ---------- */
+
+test("hostile: 5000×5000pt giant page renders capped, search-redact still exact", async () => {
+  const { page, errors } = await newPage();
+  await uploadFixture(page, "giant.pdf");
+  await waitEditor(page);
+  const rendered = await page.evaluate(() => {
+    const b = window.__redacat.state.pages[0];
+    return { w: b.width, h: b.height };
+  });
+  assert(rendered.w * rendered.h <= 16.5e6, `render capped: ${rendered.w}x${rendered.h}`);
+  const res = await page.evaluate(() => window.__redacat.searchAndMark("GIANT-SECRET"));
+  assertEq(res.hits, 1, "found secret on giant page");
+  await page.click("#download");
+  const bytes = await waitDownload("giant.redacted.pdf", 60000);
+  const [t] = pdfPagesText(bytes);
+  assert(!t.includes("GIANT-SECRET"), "giant secret removed");
+  assert(t.includes("giant public text"), "giant public survives");
+  assertEq(errors.length, 0, `console errors: ${errors.join(" | ")}`);
+  await page.close();
+});
+
+test("hostile: zero-area MediaBox opens as normalized blank page, no crash", async () => {
+  const { page, errors } = await newPage();
+  await uploadFixture(page, "badmedia.pdf");
+  await waitEditor(page);
+  await page.evaluate(() => window.__redacat.addMark(0, { x: 10, y: 10, w: 60, h: 40 }));
+  const status = await page.$eval("#status", (e) => e.textContent);
+  assert(status.includes("1 mark"), "can even mark the blank page");
+  // mupdf legitimately logs repair diagnostics for this deliberately broken file
+  const real = errors.filter((e) => !/format error|repair/i.test(e));
+  assertEq(real.length, 0, `unexpected console errors: ${real.join(" | ")}`);
+  await page.close();
+});
+
+test("hostile: zero-dimension SVG is rejected politely", async () => {
+  const ctx = await newPage([{}]);
+  await uploadFixture(ctx.page, "zero.svg");
+  await waitForDialog(ctx, (d) => d.type === "alert" && d.message.includes("Couldn't open"));
+  const introVisible = await ctx.page.evaluate(() => !document.getElementById("intro").hidden);
+  assert(introVisible, "intro still shown");
+  await ctx.page.close();
+});
+
+test("hostile: over-limit image is downscaled with a warning, then works", async () => {
+  const ctx = await newPage([{}]); // accept the downscale alert
+  await ctx.page.evaluate(() => { window.__redacat.LIMITS.maxImagePixels = 50000; }); // 0.05 MP
+  await uploadFixture(ctx.page, "plain.png"); // 400×300 = 120k px -> must shrink
+  await waitEditor(ctx.page);
+  await waitForDialog(ctx, (d) => d.type === "alert" && d.message.includes("scaled down"));
+  const dims = await ctx.page.evaluate(() => {
+    const b = window.__redacat.state.base;
+    return { w: b.width, h: b.height };
+  });
+  assert(dims.w * dims.h <= 50000, `downscaled: ${dims.w}x${dims.h}`);
+  assert(Math.abs(dims.w / dims.h - 400 / 300) < 0.02, "aspect ratio kept");
+  await ctx.page.evaluate(() => window.__redacat.addMark(0, { x: 5, y: 5, w: 40, h: 30 }));
+  const status = await ctx.page.$eval("#status", (e) => e.textContent);
+  assert(status.includes("1 mark"), "marking still works after downscale");
+  await ctx.page.close();
+});
+
+test("hostile: second file dropped mid-open is ignored, state stays consistent", async () => {
+  const { page, errors } = await newPage();
+  const input = await page.$("#file");
+  // fire two opens back-to-back without waiting; the second must be ignored
+  await input.uploadFile(path.join(FIX, "fivepages.pdf"));
+  await input.uploadFile(path.join(FIX, "basic.pdf"));
+  await waitEditor(page);
+  await sleep(1000);
+  const fname = await page.$eval("#fname", (e) => e.textContent);
+  const pages = await page.evaluate(() => window.__redacat.state.pageCount);
+  assert(
+    (fname === "fivepages.pdf" && pages === 5) || (fname === "basic.pdf" && pages === 2),
+    `filename and page count agree: ${fname} / ${pages} pages`,
+  );
+  assertEq(errors.length, 0, `console errors: ${errors.join(" | ")}`);
+  await page.close();
+});
+
+test("hostile: weird search needles never crash", async () => {
+  const { page, errors } = await newPage();
+  await uploadFixture(page, "basic.pdf");
+  await waitEditor(page);
+  const needles = ["🐈‍⬛ emoji", "עברית", "   ", "\\n\\\\", "((((", "x".repeat(10000)];
+  for (const n of needles) {
+    const res = await page.evaluate((s) => window.__redacat.searchAndMark(s), n);
+    assertEq(res.hits, 0, `no hits for ${JSON.stringify(n.slice(0, 12))}`);
+    assert(!res.failed, `no failure for ${JSON.stringify(n.slice(0, 12))}`);
+  }
+  assertEq(errors.length, 0, `console errors: ${errors.join(" | ")}`);
+  await page.close();
+});
+
+test("hostile: filenames with emoji / no extension produce sane downloads", async () => {
+  fs.copyFileSync(path.join(FIX, "basic.pdf"), path.join(FIX, "émoji 🐈 name.pdf"));
+  const { page } = await newPage();
+  await uploadFixture(page, "émoji 🐈 name.pdf");
+  await waitEditor(page);
+  await markFitzRect(page, 0, [70, 176, 220, 198]);
+  await page.click("#download");
+  const bytes = await waitDownload("émoji 🐈 name.redacted.pdf");
+  assert(bytes.length > 500, "emoji-named download arrived");
+  await page.close();
+});
+
+test("hostile: invisible-but-extractable text (fake redaction, white-on-white) is removed", async () => {
+  const { page } = await newPage();
+  await uploadFixture(page, "hidden.pdf");
+  await waitEditor(page);
+  // both strings are invisible on screen; the text layer still finds & kills them
+  const r1 = await page.evaluate(() => window.__redacat.searchAndMark("HIDDEN-UNDER-BOX"));
+  const r2 = await page.evaluate(() => window.__redacat.searchAndMark("WHITE-ON-WHITE"));
+  assertEq(r1.hits, 1, "found text hidden under a drawn box");
+  assertEq(r2.hits, 1, "found white-on-white text");
+  await page.click("#download");
+  const bytes = await waitDownload("hidden.redacted.pdf");
+  const [t] = pdfPagesText(bytes);
+  assert(!t.includes("HIDDEN-UNDER-BOX"), "boxed text removed");
+  assert(!t.includes("WHITE-ON-WHITE"), "white text removed");
+  assert(t.includes("hidden fixture public line"), "public line survives");
+  assert(!Buffer.from(bytes).toString("latin1").includes("HIDDEN-UNDER-BOX"), "gone from raw bytes");
+  await page.close();
+});
+
+test("privacy: an entire session makes zero cross-origin requests", async () => {
+  const ctx = await newPage();
+  const { page } = ctx;
+  await uploadFixture(page, "basic.pdf");
+  await waitEditor(page);
+  await page.evaluate(() => window.__redacat.searchAndMark("TOP-SECRET-ALPHA"));
+  await page.click("#download");
+  await waitDownload("basic.redacted.pdf");
+  const origin = new URL(BASE).origin;
+  const foreign = ctx.requests.filter((u) => new URL(u).origin !== origin);
+  assertEq(foreign.length, 0, `cross-origin requests seen: ${foreign.join(", ")}`);
+  assert(ctx.requests.length > 3, "sanity: same-origin asset requests were captured");
   await page.close();
 });
 

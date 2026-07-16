@@ -77,8 +77,14 @@ redacted text is absent from the raw bytes of the output file. The fixture zoo
 covers rotated pages (90°/270°), CropBox-offset pages, AES-encrypted PDFs
 (wrong password, cancel, and round-trip re-encryption), embedded-image
 scrubbing, zero-page and corrupt files, EXIF-rotated JPEGs, alpha-channel
-PNGs, WebP, marks at canvas corners, and undo/redo state machines. It runs on
-every push via GitHub Actions.
+PNGs, WebP, marks at canvas corners, and undo/redo state machines. A
+hostile-input pass adds: 5000×5000pt giant pages (render-size capped),
+zero-area MediaBox files, zero-dimension SVGs, >80-megapixel images
+(downscaled with a warning), concurrent file drops mid-open, emoji filenames,
+10k-char/emoji/RTL search needles, invisible-but-extractable text
+(white-on-white and text hidden under a drawn box — the classic fake
+redaction), and a privacy test asserting an entire editing session makes zero
+cross-origin requests. It runs on every push via GitHub Actions.
 
 ```sh
 cd tests

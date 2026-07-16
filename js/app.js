@@ -331,6 +331,7 @@ function removeSelected() {
 
 window.addEventListener("keydown", (e) => {
   if (els.editor.hidden) return;
+  if (!els.busy.hidden) return; // the overlay blocks clicks; block keys too
   if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
   if ((e.key === "Backspace" || e.key === "Delete")) { e.preventDefault(); removeSelected(); }
   else if (e.key === "Escape") { state.selected = null; render(); }
@@ -343,13 +344,20 @@ window.addEventListener("keydown", (e) => {
 // The scale is measured from the live window at the FIRST touch of each page
 // (so late-visited pages render sharp after a resize) and frozen after that
 // (so stored mark coordinates on the page stay valid).
+// keeps a pathological 14400×14400pt page from becoming a 200-megapixel bitmap
+const MAX_PAGE_PIXELS = 16e6;
+
 function computeMeta(doc, i) {
   const bounds = doc.loadPage(i).getBounds();
   const pw = Math.max(1, bounds[2] - bounds[0]);
+  const ph = Math.max(1, bounds[3] - bounds[1]);
   const dpr = window.devicePixelRatio || 1;
   const mainW = document.querySelector("main").clientWidth;
   const refWidth = Math.min(958, mainW || 958) * dpr * 1.25;
-  return { bounds, scale: Math.min(3, Math.max(1, refWidth / pw)) };
+  let scale = Math.min(3, Math.max(1, refWidth / pw));
+  scale = Math.min(scale, Math.sqrt(MAX_PAGE_PIXELS / (pw * ph)));
+  scale = Math.max(scale, 16 / Math.min(pw, ph)); // never a zero-pixel render
+  return { bounds, scale };
 }
 
 function ensureMeta(i) {
@@ -483,18 +491,26 @@ els.searchtext.addEventListener("keydown", (e) => {
 
 /* ---------- file loading ---------- */
 
+let opening = false;
+
 async function loadFile(file) {
-  const name = file.name || "pasted-image.png";
-  const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(name);
+  if (opening) return; // drops/pastes during an in-flight open are ignored
+  opening = true;
   try {
-    if (isPdf) await openPdf(file, name);
-    else await openImage(file, name);
-  } catch (err) {
-    unbusy();
-    alert(`Couldn't open that file.\n\n${err.message || err}`);
-    return; // nothing was torn down — whatever was open before stays open
+    const name = file.name || "pasted-image.png";
+    const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(name);
+    try {
+      if (isPdf) await openPdf(file, name);
+      else await openImage(file, name);
+    } catch (err) {
+      unbusy();
+      alert(`Couldn't open that file.\n\n${err.message || err}`);
+      return; // nothing was torn down — whatever was open before stays open
+    }
+    showEditor(name);
+  } finally {
+    opening = false;
   }
-  showEditor(name);
 }
 
 // switch the UI to the editor — only after a successful open
@@ -538,6 +554,9 @@ function resetDoc() {
   state.composite = null;
 }
 
+// canvases much beyond this fail or thrash; oversized images are scaled down
+const LIMITS = { maxImagePixels: 80e6 };
+
 async function openImage(source, name) {
   await busy("opening image…");
   let bitmap;
@@ -556,6 +575,19 @@ async function openImage(source, name) {
       img.onerror = () => rej(new Error("Not a supported image format."));
       img.src = url;
     });
+  }
+  const w = bitmap.width, h = bitmap.height;
+  if (!w || !h) throw new Error("That image has zero width or height.");
+  if (w * h > LIMITS.maxImagePixels) {
+    const s = Math.sqrt(LIMITS.maxImagePixels / (w * h));
+    const c = document.createElement("canvas");
+    // floor, not round — rounding up can overshoot the pixel budget
+    c.width = Math.max(1, Math.floor(w * s));
+    c.height = Math.max(1, Math.floor(h * s));
+    c.getContext("2d").drawImage(bitmap, 0, 0, c.width, c.height);
+    bitmap.close?.();
+    bitmap = c;
+    alert(`This image is very large (${w}×${h}), which browsers can't edit reliably. It was scaled down to ${c.width}×${c.height} — the redacted copy will be that size.`);
   }
   resetDoc();
   state.kind = "image";
@@ -618,11 +650,15 @@ async function openPdf(file, name) {
 /* ---------- export ---------- */
 
 els.download.addEventListener("click", async () => {
+  if (els.download.disabled) return;
+  els.download.disabled = true; // no double-exports from rapid clicks
   if (state.kind === "image") {
     await busy("rebuilding image…");
     rebuildComposite();
     state.composite.toBlob((blob) => {
       unbusy();
+      updateStatus();
+      if (!blob) { alert("Export failed — the image may be too large for this browser."); return; }
       download(blob, `${baseName(state.filename)}.redacted.png`);
     }, "image/png");
   } else {
@@ -634,6 +670,8 @@ els.download.addEventListener("click", async () => {
     } catch (err) {
       unbusy();
       alert(`Redaction failed.\n\n${err.message || err}`);
+    } finally {
+      updateStatus();
     }
   }
 });
@@ -775,6 +813,7 @@ window.__redacat = {
   state,
   refresh,
   loadFile,
+  LIMITS,
   searchAndMark,
   exportPdf,
   addMark: (pageIdx, m) => addMarkAt(pageIdx, { mode: "black", strength: state.strength, ...m }),

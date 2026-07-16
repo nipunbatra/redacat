@@ -104,6 +104,42 @@ for (const rot of [90, 270]) {
   if (check.authenticatePassword(FIXTURE_PW) === 0) throw new Error("password mismatch");
 }
 
+// ---- giant.pdf: 5000×5000pt page (25 MP at 1x — must be down-scaled) ----
+{
+  const { doc, font } = await newDoc();
+  const p = doc.addPage([5000, 5000]);
+  p.drawText("GIANT-SECRET", { x: 200, y: 4700, size: 120, font });
+  p.drawText("giant public text", { x: 200, y: 4400, size: 120, font });
+  write("giant.pdf", await doc.save());
+}
+
+// ---- badmedia.pdf: MediaBox [0 0 0 0] (mupdf normalizes to letter) ----
+{
+  const raw = `%PDF-1.4
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 0 0] >> endobj
+trailer << /Size 4 /Root 1 0 R >>
+%%EOF`;
+  write("badmedia.pdf", Buffer.from(raw, "latin1"));
+}
+
+// ---- zero.svg: image with zero intrinsic dimensions ----
+write("zero.svg", Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0"></svg>`));
+
+// ---- hidden.pdf: text that is invisible on screen but fully extractable ----
+{
+  const { doc, font } = await newDoc();
+  const p = doc.addPage([612, 792]);
+  // classic fake redaction: text with an opaque box drawn on top of it
+  p.drawText("HIDDEN-UNDER-BOX", { x: 72, y: 600, size: 14, font });
+  p.drawRectangle({ x: 65, y: 590, width: 220, height: 30, color: rgb(0, 0, 0) });
+  // white-on-white text
+  p.drawText("WHITE-ON-WHITE", { x: 72, y: 500, size: 14, font, color: rgb(1, 1, 1) });
+  p.drawText("hidden fixture public line", { x: 72, y: 400, size: 14, font });
+  write("hidden.pdf", await doc.save());
+}
+
 // ---- corrupt.pdf: deterministic garbage bytes ----
 {
   const junk = Buffer.alloc(4096);
