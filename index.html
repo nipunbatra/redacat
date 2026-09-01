@@ -150,9 +150,10 @@
       <button class="btn tool on" data-mode="side" type="button" aria-pressed="true">◫ side by side</button>
       <button class="btn tool" data-mode="overlay" type="button" aria-pressed="false">▩ overlay</button>
       <button class="btn tool" data-mode="swipe" type="button" aria-pressed="false">⇋ swipe</button>
+      <button class="btn tool" data-mode="text" type="button" aria-pressed="false">≡ text</button>
     </div>
     <button class="btn tool on" id="chl" type="button" aria-pressed="true">▤ highlights</button>
-    <div class="group pager">
+    <div class="group pager" id="cpager">
       <button class="btn" id="cprev" type="button" aria-label="Previous page">◀</button>
       <span class="mono" id="cpageinfo">1 / 1</span>
       <button class="btn" id="cnext" type="button" aria-label="Next page">▶</button>
@@ -178,6 +179,7 @@
     <div id="cone" hidden>
       <div class="canvas-wrap sheet"><canvas id="cvO" aria-label="Overlay of both versions of the current page"></canvas></div>
     </div>
+    <div id="cdoctext" class="ctext doctext sheet" aria-label="Whole-document text differences" hidden></div>
     <div class="statusline mono">
       <span id="cstatus" role="status"></span>
       <span class="hint" id="clegend"></span>

@@ -932,6 +932,74 @@ test("compare: two-file drop entry point works from the landing page", async () 
   await page.close();
 });
 
+test("compare: text view sees through reflow — exactly one changed word", async () => {
+  const { page, errors } = await newPage();
+  await uploadComparePair(page, "reflowv1.pdf", "reflowv2.pdf");
+  await waitScan(page);
+  // pagination shifted, so the per-page scan flags pages as changed…
+  const statuses = await page.evaluate(() => window.__redacatCompare.state.scan.map((s) => s.status));
+  assert(statuses.some((s) => s !== "same"), `per-page scan sees reflow: ${statuses}`);
+  // …but the document text view reduces it all to the real edit
+  await page.click('#cmodes [data-mode="text"]');
+  await page.waitForFunction(
+    () => window.__redacatCompare.state.docDiff && document.getElementById("busy").hidden,
+    { timeout: 120000 },
+  );
+  const info = await page.evaluate(() => {
+    const d = window.__redacatCompare.state.docDiff;
+    const words = (t) => d.ops.filter((o) => o.t === t).flatMap((o) => o.words);
+    return {
+      del: words("-"), ins: words("+"),
+      panel: document.getElementById("cdoctext").textContent,
+      status: document.getElementById("cstatus").textContent,
+      stripHidden: document.getElementById("cstrip").hidden,
+      pagerHidden: document.getElementById("cpager").hidden,
+    };
+  });
+  assertEq(JSON.stringify(info.del), JSON.stringify(["efficiency"]), "only the real word removed");
+  assertEq(JSON.stringify(info.ins), JSON.stringify(["throughput"]), "only the real word added");
+  assert(info.status.includes("−1 +1 words"), `doc status: "${info.status}"`);
+  assert(!info.panel.includes("REFLOW REPORT"), "running head stripped from the text view");
+  assert(info.panel.includes("information processing"), "hyphenated word rejoined");
+  assert(info.stripHidden && info.pagerHidden, "page strip and pager hidden in text view");
+  // download the text diff
+  await page.click("#cdownload");
+  const txt = (await waitDownload("reflowv1-vs-reflowv2.textdiff.txt")).toString("utf8");
+  assert(txt.includes("[-efficiency-]") && txt.includes("{+throughput+}"), `textdiff content: ${txt.slice(0, 200)}`);
+  // switching back restores the visual views
+  await page.click('#cmodes [data-mode="side"]');
+  await sleep(200);
+  const back = await page.evaluate(() => ({
+    strip: document.getElementById("cstrip").hidden,
+    doctext: document.getElementById("cdoctext").hidden,
+    pair: document.getElementById("cpair").hidden,
+  }));
+  assert(!back.strip && back.doctext && !back.pair, "side-by-side restored after text view");
+  assertEq(errors.length, 0, `console errors: ${errors.join(" | ")}`);
+  await page.close();
+});
+
+test("compare: text view on the standard pair shows amount change and added line", async () => {
+  const { page } = await newPage();
+  await uploadComparePair(page, "diffv1.pdf", "diffv2.pdf");
+  await waitScan(page);
+  await page.click('#cmodes [data-mode="text"]');
+  await page.waitForFunction(
+    () => window.__redacatCompare.state.docDiff && document.getElementById("busy").hidden,
+    { timeout: 120000 },
+  );
+  const info = await page.evaluate(() => {
+    const d = window.__redacatCompare.state.docDiff;
+    const words = (t) => d.ops.filter((o) => o.t === t).flatMap((o) => o.words);
+    return { del: words("-"), ins: words("+") };
+  });
+  assert(info.del.includes("USD-250000"), `old amount removed: ${info.del}`);
+  assert(info.ins.includes("USD-275000"), `new amount added: ${info.ins}`);
+  assert(info.ins.includes("ADDED-LINE-V2"), `added line present: ${info.ins}`);
+  assert(info.ins.join(" ").includes("appendix page only in v2"), "added page's text shows as insertion");
+  await page.close();
+});
+
 test("compare: close resets state and the redaction editor still works", async () => {
   const { page } = await newPage();
   await uploadComparePair(page, "diffv1.pdf", "diffv2.pdf");

@@ -55,6 +55,14 @@ still fully client-side:
 - **Overlay** — both versions blended: red ink exists only in the old file,
   teal ink only in the new one, dark ink is unchanged.
 - **Swipe** — drag a divider across the page, old on the left, new on the right.
+- **Text** — a whole-document word diff of the *flowing text*, for pairs whose
+  pagination differs (a preprint vs. the publisher's typeset proof). Both
+  documents are flattened with page furniture removed — running heads,
+  watermarks, page and margin line numbers, end-of-line hyphenation, dash and
+  ligature differences — then aligned sentence-first (patience-anchored, so
+  book-length documents work) and refined word-by-word. Text that merely moved
+  to a different page shows no diff at all; long unchanged runs fold away and
+  expand on click. Exportable as a `[-removed-] {+added+}` text file.
 - A **page strip** with thumbnails classifies every page up front (unchanged /
   changed / only-in-old / only-in-new), so a 50-page contract shows you the
   three pages worth reading.
@@ -115,8 +123,11 @@ cross-origin requests. The compare view has its own pass: page-status
 classification on a known version pair, page realignment around an inserted
 cover page (with exact old↔new page mapping), exact word-level insert/delete
 detection, identical-page and page-count-mismatch handling, encrypted inputs,
-mixed-size image pairs, view-mode switching, diff-image download, and a second
-zero-cross-origin privacy test. It runs on every push via GitHub Actions.
+mixed-size image pairs, view-mode switching, diff-image download, a second
+zero-cross-origin privacy test, and a repagination fixture proving the text
+view reduces a reflowed document to exactly its one changed word (running
+heads stripped, hyphenation rejoined). It runs on every push via GitHub
+Actions.
 
 ```sh
 cd tests

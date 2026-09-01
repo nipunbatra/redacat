@@ -7,7 +7,10 @@
 // editor, nothing ever leaves the tab.
 
 import { loadEngine } from "./engine.js";
-import { alignPages, jaccard, pixelRegions, pixelsDiffer, shingleSet, tokenDiff } from "./diff.js";
+import {
+  alignPages, docTextDiff, flowDocText, jaccard,
+  pixelRegions, pixelsDiffer, shingleSet, tokenDiff,
+} from "./diff.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -18,10 +21,10 @@ const els = {
   slotName: { A: $("slotAname"), B: $("slotBname") },
   slotInput: { A: $("fileA"), B: $("fileB") },
   bar: $("cbar"), names: $("cnames"), summary: $("csummary"),
-  modes: $("cmodes"), hl: $("chl"),
+  modes: $("cmodes"), hl: $("chl"), pager: $("cpager"),
   prev: $("cprev"), next: $("cnext"), pageinfo: $("cpageinfo"),
   close: $("cclose"), download: $("cdownload"),
-  views: $("cviews"), strip: $("cstrip"),
+  views: $("cviews"), strip: $("cstrip"), doctext: $("cdoctext"),
   pair: $("cpair"), capA: $("capA"), capB: $("capB"), one: $("cone"),
   cvA: $("cvA"), cvB: $("cvB"), cvO: $("cvO"),
   status: $("cstatus"), legend: $("clegend"),
@@ -50,13 +53,14 @@ const S = {
   sigA: null, sigB: null,  // per-page {text, words, sh, vec?} (null on fallback)
   pageMax: 0,              // = pairs.length
   pageIndex: 0,            // index into pairs
-  mode: "side",            // side | overlay | swipe
+  mode: "side",            // side | overlay | swipe | text
   highlights: true,
   swipeX: 0.55,
   scan: [],                // per pair {status, thumb}; status: pending|same|changed|added|removed
   scanned: false,
   scanToken: 0,
   cache: new Map(),        // pairIndex -> entry (LRU, capped at CACHE_PAGES)
+  docDiff: null,           // whole-document text diff, built on first use
 };
 
 /* ---------- helpers ---------- */
@@ -98,6 +102,7 @@ function closeCompare() {
   S.scanned = false;
   S.pairs = [];
   S.sigA = S.sigB = null;
+  S.docDiff = null;
   S.pageMax = 0;
   S.pageIndex = 0;
   S.active = false;
@@ -133,6 +138,7 @@ function invalidateCompare() {
   S.scanned = false;
   S.pairs = [];
   S.sigA = S.sigB = null;
+  S.docDiff = null;
   S.pageIndex = 0;
   els.bar.hidden = true;
   els.views.hidden = true;
@@ -329,6 +335,7 @@ async function beginCompare() {
   buildStrip();
   updateSummary();
   await cGotoPage(0, true);
+  await setMode(S.mode); // re-applies view visibility (and doc diff, if in text mode)
   scanAll(); // async background sweep; guards itself with scanToken
 }
 
@@ -626,6 +633,7 @@ function updatePager() {
 }
 
 function drawViews() {
+  if (S.mode === "text") return; // the text view has no canvases
   const e = S.cache.get(S.pageIndex);
   if (!e) return;
   const side = S.mode === "side";
@@ -708,9 +716,114 @@ function paintRegions(g, e) {
   g.restore();
 }
 
+/* ---------- whole-document text view ---------- */
+
+async function setMode(mode) {
+  S.mode = mode;
+  for (const b of els.modes.querySelectorAll(".tool")) {
+    const on = b.dataset.mode === mode;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-pressed", String(on));
+  }
+  const isText = mode === "text";
+  els.strip.hidden = isText;
+  els.pager.hidden = isText;
+  els.hl.hidden = isText;
+  els.textwrap.hidden = isText;
+  els.doctext.hidden = !isText;
+  els.download.textContent = isText ? "download text diff" : "download diff image";
+  if (isText) {
+    els.pair.hidden = true;
+    els.one.hidden = true;
+    await ensureDocDiff();
+  } else {
+    drawViews();
+  }
+  updateStatus();
+  updateLegend();
+}
+
+async function ensureDocDiff() {
+  if (!S.docDiff) {
+    await busy("reading both documents…");
+    try {
+      const pagesOf = (side, sigs) => {
+        const d = S[side];
+        const out = [];
+        for (let i = 0; i < d.pageCount; i++) {
+          let t = sigs?.[i]?.text;
+          if (t == null) { try { t = pageTextRaw(d.doc, i); } catch { t = ""; } }
+          out.push(t);
+        }
+        return out;
+      };
+      const ta = flowDocText(pagesOf("A", S.sigA));
+      const tb = flowDocText(pagesOf("B", S.sigB));
+      S.docDiff = !ta.trim() && !tb.trim() ? { empty: true } : docTextDiff(ta, tb);
+    } finally {
+      unbusy();
+    }
+  }
+  renderDocDiff();
+}
+
+function renderDocDiff() {
+  const d = S.docDiff;
+  els.doctext.replaceChildren();
+  if (!d) return;
+  const span = (cls, s) => {
+    const el = document.createElement("span");
+    if (cls) el.className = cls;
+    el.textContent = s;
+    return el;
+  };
+  if (d.empty) {
+    els.doctext.appendChild(span("tmuted", "no text layer in either file — use the visual views instead."));
+    return;
+  }
+  if (!d.delCount && !d.insCount) {
+    els.doctext.appendChild(span("tmuted",
+      "no text differences — after ignoring page furniture (headers, page numbers, hyphenation), the documents read identically."));
+    return;
+  }
+  const CONTEXT = 25, FOLD_MIN = 60;
+  for (const o of d.ops) {
+    if (o.t === "=") {
+      if (o.words.length > FOLD_MIN) {
+        els.doctext.appendChild(span("", o.words.slice(0, CONTEXT).join(" ") + " "));
+        const hidden = o.words.slice(CONTEXT, o.words.length - CONTEXT);
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "tfold";
+        btn.textContent = `⋯ ${hidden.length} unchanged words ⋯`;
+        btn.title = "show the unchanged text";
+        btn.addEventListener("click", () => btn.replaceWith(span("", hidden.join(" ") + " ")));
+        els.doctext.appendChild(btn);
+        els.doctext.appendChild(span("", " " + o.words.slice(-CONTEXT).join(" ") + " "));
+      } else {
+        els.doctext.appendChild(span("", o.words.join(" ") + " "));
+      }
+    } else if (o.t === "-") {
+      els.doctext.appendChild(span("tdel", o.words.join(" ")));
+      els.doctext.appendChild(span("", " "));
+    } else {
+      els.doctext.appendChild(span("tins", o.words.join(" ")));
+      els.doctext.appendChild(span("", " "));
+    }
+  }
+}
+
 /* ---------- status, summary, legend, text panel ---------- */
 
 function updateStatus() {
+  if (S.mode === "text") {
+    const d = S.docDiff;
+    els.status.textContent = !d ? ""
+      : d.empty ? "no text layer in either file"
+      : !d.delCount && !d.insCount ? "whole document · no text differences"
+      : `whole document · −${d.delCount} +${d.insCount} words`;
+    return;
+  }
   const e = S.cache.get(S.pageIndex);
   if (!e) { els.status.textContent = ""; return; }
   const bits = [];
@@ -754,6 +867,12 @@ function legendItem(swatchClass, label) {
 
 function updateLegend() {
   els.legend.replaceChildren();
+  if (S.mode === "text") {
+    els.legend.appendChild(legendItem("sdel", "removed"));
+    els.legend.appendChild(legendItem("sins", "added"));
+    els.legend.appendChild(document.createTextNode(" headers, page numbers & hyphenation ignored"));
+    return;
+  }
   if (S.mode === "swipe") {
     els.legend.textContent = "drag the divider — old on the left, new on the right";
     return;
@@ -942,13 +1061,7 @@ els.sample.addEventListener("click", async () => {
 els.modes.addEventListener("click", (e) => {
   const btn = e.target.closest(".tool");
   if (!btn) return;
-  S.mode = btn.dataset.mode;
-  for (const b of els.modes.querySelectorAll(".tool")) {
-    const on = b === btn;
-    b.classList.toggle("on", on);
-    b.setAttribute("aria-pressed", String(on));
-  }
-  drawViews();
+  setMode(btn.dataset.mode);
 });
 
 els.hl.addEventListener("click", () => {
@@ -983,9 +1096,37 @@ function moveSwipe(e) {
   drawViews();
 }
 
+function downloadBlob(blob, name) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+
 els.download.addEventListener("click", () => {
+  if (!S.A || !S.B) return;
+  if (S.mode === "text") {
+    const d = S.docDiff;
+    if (!d?.ops) return;
+    let out = `# ${S.A.name} vs ${S.B.name} — whole-document word diff\n# [-removed-] {+added+} · headers, page numbers & hyphenation ignored\n\n`;
+    let col = 0;
+    for (const o of d.ops) {
+      const chunk = o.t === "=" ? o.words.join(" ")
+        : o.t === "-" ? `[-${o.words.join(" ")}-]`
+        : `{+${o.words.join(" ")}+}`;
+      for (const w of chunk.split(" ")) {
+        if (col + w.length > 100) { out += "\n"; col = 0; }
+        out += (col ? " " : "") + w;
+        col += w.length + 1;
+      }
+    }
+    downloadBlob(new Blob([out + "\n"], { type: "text/plain" }),
+      `${baseName(S.A.name)}-vs-${baseName(S.B.name)}.textdiff.txt`);
+    return;
+  }
   const e = S.cache.get(S.pageIndex);
-  if (!e || !S.A || !S.B) return;
+  if (!e) return;
   const pad = 14, header = 30;
   const out = document.createElement("canvas");
   const sideBySide = S.mode === "side";
@@ -1006,11 +1147,7 @@ els.download.addEventListener("click", () => {
   }
   out.toBlob((blob) => {
     if (!blob) { alert("Export failed — the diff image may be too large for this browser."); return; }
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `${baseName(S.A.name)}-vs-${baseName(S.B.name)}.page${S.pageIndex + 1}.png`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    downloadBlob(blob, `${baseName(S.A.name)}-vs-${baseName(S.B.name)}.page${S.pageIndex + 1}.png`);
   }, "image/png");
 });
 

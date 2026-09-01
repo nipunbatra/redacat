@@ -223,4 +223,53 @@ trailer
   }
 }
 
+// ---- reflowv1.pdf / reflowv2.pdf: same sentences, different pagination ----
+// v2 repaginates (a sentence moves from page 1 to page 2), v1 hyphenates
+// "infor-mation" across lines, and exactly ONE word changes
+// (efficiency -> throughput). Every page also carries a running head and a
+// page number. The per-page views see changes everywhere; the document text
+// view must report exactly the one changed word.
+{
+  const HEAD = "REFLOW REPORT - INTERNAL";
+  const pageOf = (doc, font, lines, num) => {
+    const p = doc.addPage([612, 792]);
+    p.drawText(HEAD, { x: 72, y: 740, size: 10, font });
+    let y = 690;
+    for (const l of lines) { p.drawText(l, { x: 72, y, size: 14, font }); y -= 34; }
+    p.drawText(String(num), { x: 300, y: 60, size: 10, font });
+  };
+  {
+    const { doc, font } = await newDoc();
+    pageOf(doc, font, [
+      "The pipeline ingests raw sensor data and normalizes it",
+      "before the model consumes it for training purposes.",
+      "Careful batching improves overall efficiency of the infor-",
+      "mation processing stage in production deployments.",
+    ], 1);
+    pageOf(doc, font, [
+      "A second phase validates the outputs against golden data.",
+      "Alerts fire when drift exceeds the configured threshold.",
+    ], 2);
+    pageOf(doc, font, ["Final page content stays identical in both versions."], 3);
+    write("reflowv1.pdf", await doc.save());
+  }
+  {
+    const { doc, font } = await newDoc();
+    pageOf(doc, font, [
+      "The pipeline ingests raw sensor data and normalizes it",
+      "before the model consumes it for training purposes.",
+      "Careful batching improves overall throughput of the information",
+    ], 1);
+    pageOf(doc, font, [
+      "processing stage in production deployments.",
+      "A second phase validates the outputs against golden data.",
+    ], 2);
+    pageOf(doc, font, [
+      "Alerts fire when drift exceeds the configured threshold.",
+      "Final page content stays identical in both versions.",
+    ], 3);
+    write("reflowv2.pdf", await doc.save());
+  }
+}
+
 console.log("fixtures done.");

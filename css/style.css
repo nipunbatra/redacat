@@ -415,6 +415,24 @@ h1 {
 }
 .ctext .tmuted { color: var(--grey); }
 
+.doctext {
+  padding: 1rem 1.2rem;
+  max-height: 72vh;
+  overflow-y: auto;
+}
+.tfold {
+  border: 1px solid var(--rule);
+  background: var(--desk);
+  color: var(--grey);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  border-radius: 2px;
+  padding: 0 0.5rem;
+  cursor: pointer;
+  margin: 0 0.25rem;
+}
+.tfold:hover { border-color: var(--ink); color: var(--ink); }
+
 /* ---------- busy overlay ---------- */
 
 .busy {
