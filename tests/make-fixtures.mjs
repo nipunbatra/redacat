@@ -165,4 +165,62 @@ trailer
   console.log("zeropage.pdf opens with", check.countPages(), "pages (want 0)");
 }
 
+// ---- diffv1.pdf / diffv2.pdf: a version pair with known differences ----
+// page 1: one changed word + one added line;  page 2: identical;
+// page 3: changed sentence;  page 4: exists only in v2.
+{
+  const mk = async (version) => {
+    const { doc, font } = await newDoc();
+    const p1 = doc.addPage([612, 792]);
+    p1.drawText("DIFF FIXTURE TITLE", { x: 72, y: 720, size: 20, font });
+    p1.drawText(
+      version === 1 ? "amount due USD-250000 total" : "amount due USD-275000 total",
+      { x: 72, y: 600, size: 14, font },
+    );
+    p1.drawText("shared line stays identical", { x: 72, y: 560, size: 14, font });
+    if (version === 2) p1.drawText("ADDED-LINE-V2 appears here", { x: 72, y: 520, size: 14, font });
+    const p2 = doc.addPage([612, 792]);
+    p2.drawText("identical second page", { x: 72, y: 700, size: 14, font });
+    const p3 = doc.addPage([612, 792]);
+    p3.drawText(
+      version === 1 ? "third page with OBSOLETE-CLAUSE inside" : "third page with nothing special",
+      { x: 72, y: 700, size: 14, font },
+    );
+    if (version === 2) {
+      const p4 = doc.addPage([612, 792]);
+      p4.drawText("appendix page only in v2", { x: 72, y: 700, size: 14, font });
+    }
+    return doc.save();
+  };
+  write("diffv1.pdf", await mk(1));
+  write("diffv2.pdf", await mk(2));
+}
+
+// ---- shiftv1.pdf / shiftv2.pdf: v2 inserts a cover page at the front ----
+// Without page alignment every page after the cover would look "changed".
+// Expected pairing: +cover, p1<->p2 same, p2<->p3 changed (one word), p3<->p4 same.
+{
+  const pageOf = (doc, font, lines) => {
+    const p = doc.addPage([612, 792]);
+    let y = 700;
+    for (const l of lines) { p.drawText(l, { x: 72, y, size: 14, font }); y -= 40; }
+  };
+  const chapters = (mid) => [
+    ["CHAPTER ONE shared opening", "the quick brown fox jumps", "over the lazy dog daily"],
+    ["CHAPTER TWO results section", `the ${mid} measurement was stable`, "across all trials we observed"],
+    ["CHAPTER THREE conclusion", "we conclude nothing surprising", "future work remains open"],
+  ];
+  {
+    const { doc, font } = await newDoc();
+    for (const lines of chapters("original")) pageOf(doc, font, lines);
+    write("shiftv1.pdf", await doc.save());
+  }
+  {
+    const { doc, font } = await newDoc();
+    pageOf(doc, font, ["COVER SHEET brand new frontmatter", "inserted only in version two"]);
+    for (const lines of chapters("revised")) pageOf(doc, font, lines);
+    write("shiftv2.pdf", await doc.save());
+  }
+}
+
 console.log("fixtures done.");

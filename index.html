@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; font-src 'self'; img-src 'self' blob: data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
-<meta name="description" content="Redacat — redact images and PDFs entirely in your browser. True redaction (content is deleted, not covered), powered by WebAssembly. No uploads, no servers, no analytics.">
+<meta name="description" content="Redacat — redact images and PDFs, or compare two PDFs, entirely in your browser. True redaction (content is deleted, not covered) and visual + text diffs, powered by WebAssembly. No uploads, no servers, no analytics.">
 <title>Redacat — redact images &amp; PDFs, nothing leaves your device</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="css/style.css">
@@ -48,6 +48,10 @@
       <button id="sample" class="btn ghost" type="button">try the sample memo</button>
     </div>
   </div>
+
+  <p class="alsobar">
+    <button id="comparelink" class="btn ghost" type="button">⇄ or compare two pdfs — see exactly what changed</button>
+  </p>
 
   <section class="facts" aria-label="How Redacat works">
     <div class="fact">
@@ -123,6 +127,68 @@
   </div>
 </section>
 
+<section id="compare" hidden>
+  <div class="cslots" id="cslots">
+    <div id="slotA" class="sheet dropzone cslot" tabindex="0" role="button" aria-label="Choose the old file to compare">
+      <input type="file" id="fileA" accept="application/pdf,.pdf,image/png,image/jpeg" hidden>
+      <div class="cslot-k mono">old</div>
+      <div class="cslot-name mono" id="slotAname">drop or click — pdf · png · jpeg</div>
+    </div>
+    <button id="cswap" class="btn ghost cswap" type="button" title="swap old and new" aria-label="Swap old and new" disabled>⇄</button>
+    <div id="slotB" class="sheet dropzone cslot" tabindex="0" role="button" aria-label="Choose the new file to compare">
+      <input type="file" id="fileB" accept="application/pdf,.pdf,image/png,image/jpeg" hidden>
+      <div class="cslot-k mono">new</div>
+      <div class="cslot-name mono" id="slotBname">drop or click — pdf · png · jpeg</div>
+    </div>
+  </div>
+  <p class="csample-row mono" id="csamplerow">both files stay on your device — <button id="csample" class="btn ghost" type="button">try a sample pair</button></p>
+
+  <div class="toolbar" id="cbar" hidden>
+    <span class="fname mono" id="cnames" title=""></span>
+    <span class="csum mono" id="csummary" role="status"></span>
+    <div class="group" id="cmodes" role="toolbar" aria-label="Diff views">
+      <button class="btn tool on" data-mode="side" type="button" aria-pressed="true">◫ side by side</button>
+      <button class="btn tool" data-mode="overlay" type="button" aria-pressed="false">▩ overlay</button>
+      <button class="btn tool" data-mode="swipe" type="button" aria-pressed="false">⇋ swipe</button>
+    </div>
+    <button class="btn tool on" id="chl" type="button" aria-pressed="true">▤ highlights</button>
+    <div class="group pager">
+      <button class="btn" id="cprev" type="button" aria-label="Previous page">◀</button>
+      <span class="mono" id="cpageinfo">1 / 1</span>
+      <button class="btn" id="cnext" type="button" aria-label="Next page">▶</button>
+    </div>
+    <div class="group grow-right">
+      <button class="btn ghost" id="cclose" type="button">✕ close</button>
+      <button class="btn primary" id="cdownload" type="button">download diff image</button>
+    </div>
+  </div>
+
+  <div id="cviews" hidden>
+    <div class="cstrip" id="cstrip" aria-label="Pages"></div>
+    <div class="cpair" id="cpair">
+      <figure class="cfig">
+        <figcaption class="mono">old — <span id="capA"></span></figcaption>
+        <div class="canvas-wrap sheet"><canvas id="cvA" aria-label="Old version of the current page"></canvas></div>
+      </figure>
+      <figure class="cfig">
+        <figcaption class="mono">new — <span id="capB"></span></figcaption>
+        <div class="canvas-wrap sheet"><canvas id="cvB" aria-label="New version of the current page"></canvas></div>
+      </figure>
+    </div>
+    <div id="cone" hidden>
+      <div class="canvas-wrap sheet"><canvas id="cvO" aria-label="Overlay of both versions of the current page"></canvas></div>
+    </div>
+    <div class="statusline mono">
+      <span id="cstatus" role="status"></span>
+      <span class="hint" id="clegend"></span>
+    </div>
+    <details class="ctextwrap sheet" id="ctextwrap">
+      <summary class="mono" id="ctextsummary">text changes on this page</summary>
+      <div class="ctext" id="ctext"></div>
+    </details>
+  </div>
+</section>
+
 </main>
 
 <div id="busy" class="busy" hidden>
@@ -136,5 +202,6 @@
 </footer>
 
 <script type="module" src="js/app.js"></script>
+<script type="module" src="js/compare.js"></script>
 </body>
 </html>

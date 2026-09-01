@@ -1,6 +1,8 @@
 // Redacat — client-side redaction for images & PDFs.
 // Images: canvas re-encode (drops EXIF). PDFs: true content removal via MuPDF WASM.
 
+import { loadEngine as loadMupdfModule } from "./engine.js";
+
 const $ = (id) => document.getElementById(id);
 
 const els = {
@@ -600,7 +602,7 @@ async function openImage(source, name) {
 async function loadEngine() {
   if (state.mupdf) return;
   await busy("loading the PDF engine (10 MB, one time)…");
-  state.mupdf = await import("../vendor/mupdf/mupdf.js");
+  state.mupdf = await loadMupdfModule();
 }
 
 async function openPdf(file, name) {
@@ -732,9 +734,11 @@ els.file.addEventListener("change", () => {
   els.file.value = "";
 });
 
+const comparing = () => document.body.classList.contains("comparing");
+
 window.addEventListener("dragover", (e) => {
   e.preventDefault();
-  els.drop.classList.add("dragover");
+  if (!comparing()) els.drop.classList.add("dragover");
 });
 window.addEventListener("dragleave", (e) => {
   if (!e.relatedTarget) els.drop.classList.remove("dragover");
@@ -742,11 +746,18 @@ window.addEventListener("dragleave", (e) => {
 window.addEventListener("drop", (e) => {
   e.preventDefault();
   els.drop.classList.remove("dragover");
-  const f = e.dataTransfer.files[0];
-  if (f) loadFile(f);
+  if (comparing()) return; // the compare view routes its own drops
+  const files = [...e.dataTransfer.files];
+  // two files dropped on the landing page = compare them
+  if (files.length >= 2 && els.editor.hidden && window.__redacatCompareOpen) {
+    window.__redacatCompareOpen(files);
+    return;
+  }
+  if (files[0]) loadFile(files[0]);
 });
 
 window.addEventListener("paste", (e) => {
+  if (comparing()) return;
   const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith("image/"));
   if (item) loadFile(item.getAsFile());
 });

@@ -1,6 +1,6 @@
 # Redacat 🐈‍⬛
 
-**Redact images & PDFs entirely in your browser. Nothing leaves your device.**
+**Redact images & PDFs — and diff two PDFs — entirely in your browser. Nothing leaves your device.**
 
 **→ https://nipunbatra.github.io/redacat/**
 
@@ -38,6 +38,33 @@ even scrolled to are still properly redacted.
 
 **Password-protected PDFs** open normally (you'll be asked for the password)
 and the redacted copy keeps the same encryption and password.
+
+## Compare two PDFs (diff)
+
+Drop two versions of a PDF (or two images) and see exactly what changed —
+still fully client-side:
+
+- **Automatic page alignment** — pages are matched by content similarity
+  (hashed word shingles, with a pixel fallback for scanned pages) before
+  diffing, so an inserted cover page or extra front matter shifts the pairing
+  instead of making every later page look "changed". Unmatched pages are
+  reported as only-in-old / only-in-new, and the header notes when pages were
+  realigned.
+- **Side by side** — old and new rendered at the same scale, with removed
+  words tinted red, added words tinted green, and changed regions outlined.
+- **Overlay** — both versions blended: red ink exists only in the old file,
+  teal ink only in the new one, dark ink is unchanged.
+- **Swipe** — drag a divider across the page, old on the left, new on the right.
+- A **page strip** with thumbnails classifies every page up front (unchanged /
+  changed / only-in-old / only-in-new), so a 50-page contract shows you the
+  three pages worth reading.
+- A **word-level text diff** panel (built from each page's real text layer, so
+  it survives reflows and font changes) plus a per-page changed-region count.
+- **Download diff image** exports the current view as a PNG for sharing.
+
+Shortcuts: `←`/`→` flip pages; drop two files at once on the landing page to
+jump straight into a comparison. Scanned/image-only pages fall back to pure
+pixel comparison and say so.
 
 Other niceties: paste a screenshot straight from the clipboard (⌘V), drag &
 drop, multi-page PDFs, undo (⌘Z), click a mark + `⌫` to remove it, and a
@@ -84,7 +111,12 @@ zero-area MediaBox files, zero-dimension SVGs, >80-megapixel images
 10k-char/emoji/RTL search needles, invisible-but-extractable text
 (white-on-white and text hidden under a drawn box — the classic fake
 redaction), and a privacy test asserting an entire editing session makes zero
-cross-origin requests. It runs on every push via GitHub Actions.
+cross-origin requests. The compare view has its own pass: page-status
+classification on a known version pair, page realignment around an inserted
+cover page (with exact old↔new page mapping), exact word-level insert/delete
+detection, identical-page and page-count-mismatch handling, encrypted inputs,
+mixed-size image pairs, view-mode switching, diff-image download, and a second
+zero-cross-origin privacy test. It runs on every push via GitHub Actions.
 
 ```sh
 cd tests

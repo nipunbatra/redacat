@@ -736,6 +736,235 @@ test("ui: download disabled with zero marks, enabled after one", async () => {
   await page.close();
 });
 
+/* ---------- compare (PDF diff) tests ---------- */
+
+async function uploadComparePair(page, nameA, nameB) {
+  await page.click("#comparelink");
+  await (await page.$("#fileA")).uploadFile(path.join(FIX, nameA));
+  await page.waitForFunction(
+    () => window.__redacatCompare?.state.A && document.getElementById("busy").hidden,
+    { timeout: 120000 },
+  );
+  await (await page.$("#fileB")).uploadFile(path.join(FIX, nameB));
+  await page.waitForFunction(
+    () => window.__redacatCompare?.state.B && document.getElementById("busy").hidden,
+    { timeout: 120000 },
+  );
+}
+
+const waitScan = (page) =>
+  page.waitForFunction(() => window.__redacatCompare?.state.scanned, { timeout: 120000 });
+
+test("compare: pair scan classifies pages (changed/same/changed/added)", async () => {
+  const { page, errors } = await newPage();
+  await uploadComparePair(page, "diffv1.pdf", "diffv2.pdf");
+  await waitScan(page);
+  const statuses = await page.evaluate(() => window.__redacatCompare.state.scan.map((s) => s.status));
+  assertEq(JSON.stringify(statuses), JSON.stringify(["changed", "same", "changed", "added"]), "page statuses");
+  const summary = await page.$eval("#csummary", (e) => e.textContent);
+  assert(summary.includes("3 of 4 pages differ"), `summary: "${summary}"`);
+  assertEq(errors.length, 0, `console errors: ${errors.join(" | ")}`);
+  await page.close();
+});
+
+test("compare: changed page has pixel regions and an exact word diff", async () => {
+  const { page } = await newPage();
+  await uploadComparePair(page, "diffv1.pdf", "diffv2.pdf");
+  await waitScan(page);
+  const info = await page.evaluate(() => {
+    const S = window.__redacatCompare.state;
+    const e = S.cache.get(0);
+    const words = (side, t) => e.text.ops
+      .filter((o) => o.t === t)
+      .flatMap((o) => (t === "-" ? e.text.wordsA.slice(o.ai, o.ai + o.n) : e.text.wordsB.slice(o.bi, o.bi + o.n)))
+      .map((w) => w.s);
+    return {
+      regions: e.regions.length,
+      del: e.text.delCount, ins: e.text.insCount,
+      delWords: words("A", "-"), insWords: words("B", "+"),
+      delRects: e.text.delRects.length, insRects: e.text.insRects.length,
+      w: e.w, h: e.h,
+      rectsInBounds: [...e.text.delRects, ...e.text.insRects]
+        .every((r) => r.x > -5 && r.y > -5 && r.x + r.w < e.w + 5 && r.y + r.h < e.h + 5),
+    };
+  });
+  assert(info.regions >= 1, `changed page has diff regions: ${info.regions}`);
+  assert(info.delWords.includes("USD-250000"), `old amount marked removed: ${info.delWords}`);
+  assert(info.insWords.includes("USD-275000"), `new amount marked added: ${info.insWords}`);
+  assert(info.insWords.includes("ADDED-LINE-V2"), `added line detected: ${info.insWords}`);
+  assert(info.delRects === info.del && info.insRects === info.ins, "one highlight rect per changed word");
+  assert(info.rectsInBounds, "word highlight rects lie on the canvas");
+  const panel = await page.$eval("#ctext", (e) => e.textContent);
+  assert(panel.includes("USD-250000") && panel.includes("USD-275000"), `text panel shows both amounts: "${panel.slice(0, 200)}"`);
+  await page.close();
+});
+
+test("compare: identical page reports no differences", async () => {
+  const { page } = await newPage();
+  await uploadComparePair(page, "diffv1.pdf", "diffv2.pdf");
+  await waitScan(page);
+  await page.evaluate(() => window.__redacatCompare.gotoPage(1));
+  await until(() => page.evaluate(() => window.__redacatCompare.state.cache.has(1)), "page 2 compared");
+  const info = await page.evaluate(() => {
+    const e = window.__redacatCompare.state.cache.get(1);
+    return { regions: e.regions.length, del: e.text.delCount, ins: e.text.insCount };
+  });
+  assertEq(info.regions, 0, "zero regions on identical page");
+  assertEq(info.del + info.ins, 0, "zero word changes on identical page");
+  const status = await page.$eval("#cstatus", (e) => e.textContent);
+  assert(status.includes("no differences"), `status says identical: "${status}"`);
+  await page.close();
+});
+
+test("compare: page present only in the new file is flagged", async () => {
+  const { page } = await newPage();
+  await uploadComparePair(page, "diffv1.pdf", "diffv2.pdf");
+  await waitScan(page);
+  await page.evaluate(() => window.__redacatCompare.gotoPage(3));
+  await until(() => page.evaluate(() => window.__redacatCompare.state.cache.has(3)), "page 4 compared");
+  const status = await page.$eval("#cstatus", (e) => e.textContent);
+  assert(status.includes("only in the new file"), `status: "${status}"`);
+  await page.close();
+});
+
+test("compare: inserted cover page realigns pages instead of cascading diffs", async () => {
+  const { page, errors } = await newPage();
+  await uploadComparePair(page, "shiftv1.pdf", "shiftv2.pdf");
+  await waitScan(page);
+  const st = await page.evaluate(() => {
+    const S = window.__redacatCompare.state;
+    return { statuses: S.scan.map((s) => s.status), pairs: S.pairs };
+  });
+  assertEq(JSON.stringify(st.statuses), JSON.stringify(["added", "same", "changed", "same"]),
+    "cover page is 'added'; shifted pages pair up");
+  assertEq(JSON.stringify(st.pairs), JSON.stringify([
+    { a: null, b: 0 }, { a: 0, b: 1 }, { a: 1, b: 2 }, { a: 2, b: 3 },
+  ]), "alignment pairs old i with new i+1");
+  const summary = await page.$eval("#csummary", (e) => e.textContent);
+  assert(summary.includes("pages realigned"), `summary notes realignment: "${summary}"`);
+  await page.evaluate(() => window.__redacatCompare.gotoPage(2));
+  await until(() => page.evaluate(() => window.__redacatCompare.state.cache.has(2)), "pair 3 compared");
+  const info = await page.evaluate(() => {
+    const e = window.__redacatCompare.state.cache.get(2);
+    const words = (t) => e.text.ops.filter((o) => o.t === t)
+      .flatMap((o) => (t === "-" ? e.text.wordsA.slice(o.ai, o.ai + o.n) : e.text.wordsB.slice(o.bi, o.bi + o.n)))
+      .map((w) => w.s);
+    return { del: words("-"), ins: words("+"), status: document.getElementById("cstatus").textContent };
+  });
+  assertEq(JSON.stringify(info.del), JSON.stringify(["original"]), "exactly the changed word marked removed");
+  assertEq(JSON.stringify(info.ins), JSON.stringify(["revised"]), "exactly the changed word marked added");
+  assert(info.status.includes("old p2 ↔ new p3"), `status shows the mapping: "${info.status}"`);
+  assertEq(errors.length, 0, `console errors: ${errors.join(" | ")}`);
+  await page.close();
+});
+
+test("compare: sample pair, view modes, and diff-image download", async () => {
+  const { page, errors } = await newPage();
+  await page.click("#comparelink");
+  await page.click("#csample");
+  await page.waitForFunction(
+    () => window.__redacatCompare?.state.A && window.__redacatCompare?.state.B
+      && document.getElementById("busy").hidden,
+    { timeout: 120000 },
+  );
+  await waitScan(page);
+  const st = await page.evaluate(() => {
+    const S = window.__redacatCompare.state;
+    return { pages: S.pageMax, statuses: S.scan.map((s) => s.status) };
+  });
+  assertEq(st.pages, 3, "sample pair has 3 aligned pairs");
+  assertEq(JSON.stringify(st.statuses), JSON.stringify(["added", "changed", "same"]),
+    "sample: cover added, policy changed, appendix same");
+  for (const mode of ["overlay", "swipe", "side"]) {
+    await page.click(`#cmodes [data-mode="${mode}"]`);
+    await sleep(150);
+  }
+  await page.click("#chl"); // highlights off…
+  await page.click("#chl"); // …and back on: both draws must survive
+  await page.click("#cdownload");
+  const bytes = await waitDownload("policy-v1-vs-policy-v2.page1.png");
+  assert(bytes.length > 5000, "diff image downloaded");
+  assertEq(errors.length, 0, `console errors: ${errors.join(" | ")}`);
+  await page.close();
+});
+
+test("compare: encrypted old side opens with password; identical content = no differences", async () => {
+  const { page, dialogs } = await newPage([{ text: FIXTURE_PW }]);
+  await uploadComparePair(page, "protected.pdf", "basic.pdf");
+  await waitScan(page);
+  assertEq(dialogs.filter((d) => d.type === "prompt").length, 1, "one password prompt");
+  const statuses = await page.evaluate(() => window.__redacatCompare.state.scan.map((s) => s.status));
+  assertEq(JSON.stringify(statuses), JSON.stringify(["same", "same"]), "decrypted pages match their plain twin");
+  const summary = await page.$eval("#csummary", (e) => e.textContent);
+  assert(summary.includes("no differences found"), `summary: "${summary}"`);
+  await page.close();
+});
+
+test("compare: images of different sizes diff by pixels, note the missing text layer", async () => {
+  const { page } = await newPage();
+  await uploadComparePair(page, "plain.png", "alpha.png");
+  await waitScan(page);
+  const info = await page.evaluate(() => {
+    const e = window.__redacatCompare.state.cache.get(0);
+    return { regions: e.regions.length, none: !!e.text.none, w: e.w, h: e.h };
+  });
+  assert(info.regions >= 1, `different images produce regions: ${info.regions}`);
+  assert(info.none, "no text layer flagged");
+  assert(info.w >= 400 && info.h >= 300, `union canvas covers the larger image: ${info.w}x${info.h}`);
+  const panel = await page.$eval("#ctext", (e) => e.textContent);
+  assert(panel.includes("no text layer"), `panel notes missing text: "${panel}"`);
+  await page.close();
+});
+
+test("compare: two-file drop entry point works from the landing page", async () => {
+  const { page } = await newPage();
+  await page.evaluate(async () => {
+    const get = async (n) =>
+      new File([await (await fetch(n)).arrayBuffer()], n.split("/").pop(), { type: "application/pdf" });
+    await window.__redacatCompareOpen([
+      await get("tests/fixtures/diffv1.pdf"),
+      await get("tests/fixtures/diffv2.pdf"),
+    ]);
+  });
+  await waitScan(page);
+  const pages = await page.evaluate(() => window.__redacatCompare.state.pageMax);
+  assertEq(pages, 4, "compare opened from the drop entry point");
+  await page.close();
+});
+
+test("compare: close resets state and the redaction editor still works", async () => {
+  const { page } = await newPage();
+  await uploadComparePair(page, "diffv1.pdf", "diffv2.pdf");
+  await waitScan(page);
+  await page.click("#cclose");
+  await waitIntroBack(page);
+  const cleared = await page.evaluate(() => {
+    const S = window.__redacatCompare.state;
+    return !S.A && !S.B && S.cache.size === 0 && !document.body.classList.contains("comparing");
+  });
+  assert(cleared, "compare state fully cleared");
+  await uploadFixture(page, "basic.pdf");
+  await waitEditor(page);
+  await page.evaluate(() => window.__redacat.addMark(0, { x: 10, y: 10, w: 50, h: 30 }));
+  const status = await page.$eval("#status", (e) => e.textContent);
+  assert(status.includes("1 mark"), `redaction works after compare: "${status}"`);
+  await page.close();
+});
+
+test("privacy: a full compare session makes zero cross-origin requests", async () => {
+  const ctx = await newPage();
+  const { page } = ctx;
+  await uploadComparePair(page, "diffv1.pdf", "diffv2.pdf");
+  await waitScan(page);
+  await page.click(`#cmodes [data-mode="overlay"]`);
+  await page.click("#cdownload");
+  await waitDownload("diffv1-vs-diffv2.page1.png");
+  const origin = new URL(BASE).origin;
+  const foreign = ctx.requests.filter((u) => new URL(u).origin !== origin);
+  assertEq(foreign.length, 0, `cross-origin requests seen: ${foreign.join(", ")}`);
+  await page.close();
+});
+
 /* ---------- run ---------- */
 
 browser = await puppeteer.launch({
