@@ -986,6 +986,9 @@ function updateSummary() {
       ? "no differences found — the files render identically"
       : `${diff} of ${S.scan.length} page${S.scan.length === 1 ? "" : "s"} differ${diff === 1 ? "s" : ""}`;
   if (realigned && done === S.scan.length) text += " · pages realigned";
+  // merged/split pages mean the files were re-typeset: pixels differ everywhere
+  // by construction, and only the text view gives a trustworthy answer
+  if (done === S.scan.length && S.pairs.some((p) => p.flow)) text += " · re-typeset — see the text view";
   els.summary.textContent = text;
 }
 
