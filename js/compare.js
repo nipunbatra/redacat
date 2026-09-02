@@ -8,7 +8,7 @@
 
 import { loadEngine } from "./engine.js";
 import {
-  alignPages, docTextDiff, flowDocText, jaccard, pageOverlap,
+  alignPages, docTextDiff, flowDocText, hyphenVocab, jaccard, pageOverlap,
   pixelRegions, pixelsDiffer, shingleSet, tokenDiff,
 } from "./diff.js";
 
@@ -289,9 +289,11 @@ function pageDims(doc, i) {
 // MuPDF only emits a space where the glyph gap exceeds its own threshold
 // (about 0.19 em); tightly justified lines in typeset proofs sit at ~0.14 em,
 // so whole lines come out with the words welded together. Rebuild the text
-// from glyph geometry instead and break words on any gap along the line that
-// is clearly wider than letter spacing.
+// from glyph geometry instead: break words on any gap along the line that is
+// clearly wider than letter spacing, and drop superscript footnote markers
+// (small raised digits), which typesetters move around punctuation.
 const WORD_GAP_EM = 0.1;
+const MARKER_EM = 0.8; // a digit set smaller than this share of the line's size is a marker
 
 // projected extent of a glyph quad along the line direction
 function glyphSpan(q, dir) {
@@ -304,22 +306,46 @@ function glyphSpan(q, dir) {
   return { s, e };
 }
 
+// walk a page's structured text line by line; each line is an array of
+// {c, size, s, e, q} glyphs (null marks a block boundary)
+function walkLines(st, onLine) {
+  let chars = null, dir = null, vertical = false;
+  st.walk({
+    beginTextBlock() { onLine(null); },
+    beginLine(_bbox, wmode, d) { chars = []; dir = d; vertical = wmode === 1; },
+    onChar(c, _origin, _font, size, q) {
+      const span = vertical ? { s: 0, e: 0 } : glyphSpan(q, dir);
+      chars.push({ c, size, s: span.s, e: span.e, q });
+    },
+    endLine() { onLine(chars, vertical); chars = null; },
+  });
+}
+
+function typicalSize(chars) {
+  const sizes = chars.map((ch) => ch.size).sort((a, b) => a - b);
+  return sizes[sizes.length >> 1] || 0;
+}
+
+const isMarker = (ch, typical) => /[0-9*†‡§]/.test(ch.c) && ch.size < MARKER_EM * typical;
+
 function pageTextRaw(doc, i) {
   const st = doc.loadPage(i).toStructuredText();
   const out = [];
-  let line = null, prev = null, dir = null, vertical = false;
-  st.walk({
-    beginTextBlock() { if (out.length) out.push(""); },
-    beginLine(_bbox, wmode, d) { line = ""; prev = null; dir = d; vertical = wmode === 1; },
-    onChar(c, _origin, _font, size, q) {
-      if (!vertical) {
-        const { s, e } = glyphSpan(q, dir);
-        if (prev && c !== " " && prev.c !== " " && s - prev.e > WORD_GAP_EM * size) line += " ";
-        prev = { c, e };
+  walkLines(st, (chars, vertical) => {
+    if (!chars) { if (out.length) out.push(""); return; }
+    const typical = typicalSize(chars);
+    let line = "", prev = null;
+    for (const ch of chars) {
+      if (isMarker(ch, typical)) {
+        // the gap after a dropped marker is measured from the marker's end
+        if (prev) prev = { c: prev.c, e: Math.max(prev.e, ch.e) };
+        continue;
       }
-      line += c;
-    },
-    endLine() { out.push(line); line = null; },
+      if (!vertical && prev && ch.c !== " " && prev.c !== " " && ch.s - prev.e > WORD_GAP_EM * ch.size) line += " ";
+      line += ch.c;
+      prev = ch;
+    }
+    out.push(line);
   });
   st.destroy();
   return out.join("\n");
@@ -409,8 +435,10 @@ async function buildAlignment() {
   // which pages correspond: page i pairs with the page that holds the words
   // the diff aligned as unchanged. Pages with no flowing text fall back to
   // word-bag similarity if they have a few words, or to pixels if they have none.
-  const flowA = flowDocText(windowPageTexts("A"), true);
-  const flowB = flowDocText(windowPageTexts("B"), true);
+  const pagesA = windowPageTexts("A"), pagesB = windowPageTexts("B");
+  const vocab = hyphenVocab([pagesA, pagesB]);
+  const flowA = flowDocText(pagesA, true, vocab);
+  const flowB = flowDocText(pagesB, true, vocab);
   S.docDiff = !flowA.text && !flowB.text ? { empty: true } : docTextDiff(flowA.text, flowB.text);
   const ov = S.docDiff.ops ? pageOverlap(S.docDiff.ops, flowA.pageOf, flowB.pageOf, N, M) : null;
   // words of each page that the diff aligned anywhere (deleted text, e.g. an
@@ -567,36 +595,38 @@ async function ensurePage(i) {
 
 /* ---------- text diff ---------- */
 
-// words with united character quads, in fitz page coordinates; a word also
-// ends at a glyph gap wider than letter spacing (see pageTextRaw)
+// words with united character quads, in fitz page coordinates — the same
+// word breaks and marker handling as pageTextRaw
 function pageWords(doc, i) {
   const st = doc.loadPage(i).toStructuredText();
   const words = [];
-  let cur = null, prevEnd = null, dir = null, vertical = false;
-  const flush = () => { if (cur && cur.s) words.push(cur); cur = null; };
-  st.walk({
-    beginLine(_bbox, wmode, d) { prevEnd = null; dir = d; vertical = wmode === 1; },
-    endLine: flush,
-    onChar(c, _origin, _font, size, q) {
-      if (/\s/.test(c)) { flush(); prevEnd = null; return; }
-      if (!vertical) {
-        const { s, e } = glyphSpan(q, dir);
-        if (prevEnd != null && s - prevEnd > WORD_GAP_EM * size) flush();
-        prevEnd = e;
+  walkLines(st, (chars, vertical) => {
+    if (!chars) return;
+    const typical = typicalSize(chars);
+    let cur = null, prev = null;
+    const flush = () => { if (cur && cur.s) words.push(cur); cur = null; };
+    for (const ch of chars) {
+      if (isMarker(ch, typical)) {
+        if (prev) prev = { e: Math.max(prev.e, ch.e) };
+        continue;
       }
+      if (/\s/.test(ch.c)) { flush(); prev = null; continue; }
+      if (!vertical && prev && ch.s - prev.e > WORD_GAP_EM * ch.size) flush();
+      prev = ch;
+      const q = ch.q;
       const x0 = Math.min(q[0], q[2], q[4], q[6]);
       const x1 = Math.max(q[0], q[2], q[4], q[6]);
       const y0 = Math.min(q[1], q[3], q[5], q[7]);
       const y1 = Math.max(q[1], q[3], q[5], q[7]);
       if (!cur) cur = { s: "", x0, y0, x1, y1 };
-      cur.s += c;
+      cur.s += ch.c;
       if (x0 < cur.x0) cur.x0 = x0;
       if (y0 < cur.y0) cur.y0 = y0;
       if (x1 > cur.x1) cur.x1 = x1;
       if (y1 > cur.y1) cur.y1 = y1;
-    },
+    }
+    flush();
   });
-  flush();
   st.destroy();
   return words;
 }
@@ -920,8 +950,10 @@ async function ensureDocDiff() {
   if (!S.docDiff) {
     await busy("reading both documents…");
     try {
-      const ta = flowDocText(windowPageTexts("A"));
-      const tb = flowDocText(windowPageTexts("B"));
+      const pa = windowPageTexts("A"), pb = windowPageTexts("B");
+      const vocab = hyphenVocab([pa, pb]);
+      const ta = flowDocText(pa, false, vocab);
+      const tb = flowDocText(pb, false, vocab);
       S.docDiff = !ta && !tb ? { empty: true } : docTextDiff(ta, tb);
     } finally {
       unbusy();

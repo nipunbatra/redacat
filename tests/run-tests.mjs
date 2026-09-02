@@ -1241,6 +1241,47 @@ test("compare: tightly justified text without space glyphs still diffs word by w
   await page.close();
 });
 
+// Each pair differs only in typesetting; the text view must see nothing.
+const NOISE_PAIRS = [
+  ["hyphv1.pdf", "hyphv2.pdf", "words broken at line ends", ["memory-based", "information", "non-representational"]],
+  ["dashv1.pdf", "dashv2.pdf", "dash styles", ["Perception - An", "127-138"]],
+  ["supv1.pdf", "supv2.pdf", "footnote markers around punctuation", ["theories.", "[1]", "A footnote line"]],
+  ["rotv1.pdf", "rotv2.pdf", "a rotated page", ["Rotation must not change the words we read."]],
+];
+test("compare: typesetting noise is not a difference: hyphenation, dashes, footnote markers, rotation", async () => {
+  for (const [a, b, what, keeps] of NOISE_PAIRS) {
+    const { page, errors } = await newPage();
+    await uploadComparePair(page, a, b);
+    await waitScan(page);
+    await page.click('#cmodes [data-mode="text"]');
+    await waitDocDiff(page);
+    const w = await page.evaluate(() => {
+      const d = window.__redacatCompare.state.docDiff;
+      const words = (t) => d.ops.filter((o) => o.t === t).flatMap((o) => o.words);
+      return { del: words("-"), ins: words("+"), same: words("="), delCount: d.delCount, insCount: d.insCount, moved: d.movedCount };
+    });
+    assertEq(w.delCount + w.insCount + w.moved, 0,
+      `${what}: no text differences (got −${w.delCount} +${w.insCount} ~${w.moved}: ${JSON.stringify(w.del)} ${JSON.stringify(w.ins)})`);
+    const text = w.same.join(" ");
+    for (const k of keeps) assert(text.includes(k), `${what}: extracted text keeps "${k}" — got "${text.slice(0, 160)}"`);
+    assertEq(errors.length, 0, `${what}: console errors: ${errors.join(" | ")}`);
+    await page.close();
+  }
+});
+
+test("compare: a file compared with itself reports no differences anywhere", async () => {
+  const { page } = await newPage();
+  await uploadComparePair(page, "diffv1.pdf", "diffv1.pdf");
+  await waitScan(page);
+  const st = await page.evaluate(() => ({
+    statuses: window.__redacatCompare.state.scan.map((s) => s.status),
+    summary: document.getElementById("csummary").textContent,
+  }));
+  assert(st.statuses.every((s) => s === "same"), `all pages unchanged: ${st.statuses}`);
+  assert(st.summary.includes("no differences found"), `summary: "${st.summary}"`);
+  await page.close();
+});
+
 test("compare: close resets state and the redaction editor still works", async () => {
   const { page } = await newPage();
   await uploadComparePair(page, "diffv1.pdf", "diffv2.pdf");

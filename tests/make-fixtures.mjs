@@ -337,4 +337,59 @@ trailer
   write("tightv2.pdf", await mk(true));
 }
 
+// ---- typesetting-noise pairs: each must produce ZERO text differences ----
+const linesPdf = async (lines, opts = {}) => {
+  const { doc, font } = await newDoc();
+  const p = doc.addPage([612, 792]);
+  if (opts.rotate) p.setRotation(degrees(opts.rotate));
+  let y = 700;
+  for (const l of lines) { p.drawText(l, { x: 72, y, size: 12, font }); y -= 28; }
+  return doc.save();
+};
+
+// hyphv1/hyphv2: words broken at line ends, in both directions. "memory-based"
+// must keep its hyphen (it occurs intact in the other file); "infor-mation"
+// must rejoin to "information".
+write("hyphv1.pdf", await linesPdf([
+  "A memory-based approach to infor-",
+  "mation processing suits non-",
+  "representational tasks well.",
+]));
+write("hyphv2.pdf", await linesPdf([
+  "A memory-",
+  "based approach to information processing",
+  "suits non-representational tasks well.",
+]));
+
+// dashv1/dashv2: spaced en dash vs closed em dash; en-dash vs hyphen in a range
+write("dashv1.pdf", await linesPdf(["Perception – An Information-Based Model", "see pages 127–138 for details."]));
+write("dashv2.pdf", await linesPdf(["Perception—An Information-Based Model", "see pages 127-138 for details."]));
+
+// supv1/supv2: a superscript footnote marker before vs after the period;
+// a normal-size citation "[1]" and a normal-size footnote line must survive
+{
+  const mk = async (markerAfterPeriod) => {
+    const { doc, font } = await newDoc();
+    const p = doc.addPage([612, 792]);
+    const size = 12, y = 700, head = "Two prominent theories";
+    p.drawText(head, { x: 72, y, size, font });
+    let x = 72 + font.widthOfTextAtSize(head, size);
+    const sup = () => { p.drawText("1", { x, y: y + 5, size: 7, font }); x += font.widthOfTextAtSize("1", 7); };
+    const dot = () => { p.drawText(".", { x, y, size, font }); x += font.widthOfTextAtSize(".", size); };
+    if (markerAfterPeriod) { dot(); sup(); } else { sup(); dot(); }
+    p.drawText("The rest cites [1] normally.", { x: x + 4, y, size, font });
+    p.drawText("1 A footnote line at its own normal size.", { x: 72, y: 600, size: 10, font });
+    return doc.save();
+  };
+  write("supv1.pdf", await mk(false));
+  write("supv2.pdf", await mk(true));
+}
+
+// rotv1/rotv2: identical text, v2's page carries /Rotate 90
+{
+  const lines = ["Rotation must not change the words we read.", "Second line of the rotated page."];
+  write("rotv1.pdf", await linesPdf(lines));
+  write("rotv2.pdf", await linesPdf(lines, { rotate: 90 }));
+}
+
 console.log("fixtures done.");
