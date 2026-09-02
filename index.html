@@ -164,6 +164,23 @@
     </div>
   </div>
 
+  <div class="rangebar mono" id="crangebar" hidden>
+    <span class="rangek">pages</span>
+    <label class="rangeside">old
+      <input type="number" id="rA0" class="rangein" min="1" aria-label="Old file: first page to compare">
+      –
+      <input type="number" id="rA1" class="rangein" min="1" aria-label="Old file: last page to compare">
+    </label>
+    <label class="rangeside">new
+      <input type="number" id="rB0" class="rangein" min="1" aria-label="New file: first page to compare">
+      –
+      <input type="number" id="rB1" class="rangein" min="1" aria-label="New file: last page to compare">
+    </label>
+    <button class="btn" id="crangeapply" type="button">compare these pages</button>
+    <button class="btn ghost" id="crangeall" type="button">all pages</button>
+    <span id="crangeinfo" class="rangeinfo" role="status"></span>
+  </div>
+
   <div id="cviews" hidden>
     <div class="cstrip" id="cstrip" aria-label="Pages"></div>
     <div class="cpair" id="cpair">

@@ -8,7 +8,7 @@
 
 import { loadEngine } from "./engine.js";
 import {
-  alignPages, docTextDiff, flowDocText, jaccard,
+  alignPages, docTextDiff, flowDocText, jaccard, pageOverlap,
   pixelRegions, pixelsDiffer, shingleSet, tokenDiff,
 } from "./diff.js";
 
@@ -25,6 +25,9 @@ const els = {
   prev: $("cprev"), next: $("cnext"), pageinfo: $("cpageinfo"),
   close: $("cclose"), download: $("cdownload"),
   views: $("cviews"), strip: $("cstrip"), doctext: $("cdoctext"),
+  rangebar: $("crangebar"), rangeapply: $("crangeapply"), rangeall: $("crangeall"),
+  rangeinfo: $("crangeinfo"),
+  rangeIn: { A: [$("rA0"), $("rA1")], B: [$("rB0"), $("rB1")] },
   pair: $("cpair"), capA: $("capA"), capB: $("capB"), one: $("cone"),
   cvA: $("cvA"), cvB: $("cvB"), cvO: $("cvO"),
   status: $("cstatus"), legend: $("clegend"),
@@ -42,15 +45,15 @@ const THUMB_W = 120;          // page-strip thumbnail width
 const MAX_THUMB_PAGES = 400;  // beyond this the strip skips thumbs & pixel scan
 const ALIGN_MAX_CELLS = 25e4; // pageCountA × pageCountB cap for alignment
 const MIN_PAGE_SIM = 0.3;     // below this, pages are add/remove, not a pair
-const MIN_TEXT_WORDS = 8;     // pages with less text align by pixels instead
 
 const S = {
   active: false,
   mupdf: null,
   opening: false,
   A: null, B: null,        // {name, doc, pageCount, password}
-  pairs: [],               // aligned [{a, b}], a/b page index or null
-  sigA: null, sigB: null,  // per-page {text, words, sh, vec?} (null on fallback)
+  winA: null, winB: null,  // page window per side {from, to} (0-based, inclusive); null = all
+  pairs: [],               // aligned [{a, b}], absolute page index or null
+  sigA: null, sigB: null,  // sparse per-page {text, words, sh, vec?} (null on fallback)
   pageMax: 0,              // = pairs.length
   pageIndex: 0,            // index into pairs
   mode: "side",            // side | overlay | swipe | text
@@ -103,11 +106,13 @@ function closeCompare() {
   S.pairs = [];
   S.sigA = S.sigB = null;
   S.docDiff = null;
+  S.winA = S.winB = null;
   S.pageMax = 0;
   S.pageIndex = 0;
   S.active = false;
   document.body.classList.remove("comparing");
   els.bar.hidden = true;
+  els.rangebar.hidden = true;
   els.views.hidden = true;
   els.compare.hidden = true;
   updateSlots();
@@ -141,7 +146,57 @@ function invalidateCompare() {
   S.docDiff = null;
   S.pageIndex = 0;
   els.bar.hidden = true;
+  els.rangebar.hidden = true;
   els.views.hidden = true;
+}
+
+/* ---------- page windows ---------- */
+
+// the page span of one side that takes part in the comparison, clamped to the file
+function windowOf(side) {
+  const d = S[side];
+  if (!d) return { from: 0, to: -1 };
+  const w = side === "A" ? S.winA : S.winB;
+  const last = d.pageCount - 1;
+  const from = Math.max(0, Math.min(last, w?.from ?? 0));
+  const to = Math.max(from, Math.min(last, w?.to ?? last));
+  return { from, to };
+}
+
+function isFullWindow(side) {
+  const w = windowOf(side);
+  return w.from === 0 && w.to === S[side].pageCount - 1;
+}
+
+function updateRangeBar() {
+  if (!S.A || !S.B) return;
+  for (const side of ["A", "B"]) {
+    const w = windowOf(side);
+    const [i0, i1] = els.rangeIn[side];
+    i0.max = i1.max = S[side].pageCount;
+    i0.value = w.from + 1;
+    i1.value = w.to + 1;
+  }
+  const a = windowOf("A"), b = windowOf("B");
+  els.rangeinfo.textContent = isFullWindow("A") && isFullWindow("B")
+    ? "all pages"
+    : `comparing old ${a.from + 1}–${a.to + 1} with new ${b.from + 1}–${b.to + 1}`;
+  els.rangeall.disabled = isFullWindow("A") && isFullWindow("B");
+}
+
+async function applyRange() {
+  if (!S.A || !S.B || S.opening) return;
+  const read = (side) => {
+    const [i0, i1] = els.rangeIn[side];
+    const last = S[side].pageCount;
+    const from = Math.max(1, Math.min(last, parseInt(i0.value, 10) || 1));
+    const to = Math.max(from, Math.min(last, parseInt(i1.value, 10) || last));
+    return { from: from - 1, to: to - 1 };
+  };
+  S.winA = read("A");
+  S.winB = read("B");
+  invalidateCompare();
+  await beginCompare();
 }
 
 function updateSlots() {
@@ -196,6 +251,7 @@ async function openSideBytes(side, name, bytes, type = "application/pdf") {
     }
     destroySide(side);
     S[side] = { name, doc, pageCount, password };
+    if (side === "A") S.winA = null; else S.winB = null; // a new file compares whole
     invalidateCompare();
     updateSlots();
     unbusy();
@@ -264,53 +320,123 @@ function rasterSim(a, b) {
   return 1 - s / (a.length * 255);
 }
 
-async function docSignatures(doc, n) {
+// sparse array indexed by absolute page number, filled for pages from..to
+async function docSignatures(doc, from, to) {
   const sigs = [];
-  for (let i = 0; i < n; i++) {
+  for (let i = from; i <= to; i++) {
     let text = "";
     try { text = pageTextRaw(doc, i); } catch {}
     const words = text.split(/\s+/).filter(Boolean);
     const sig = { text, words: words.length, sh: shingleSet(words), vec: null };
-    if (words.length < MIN_TEXT_WORDS) {
+    if (!words.length) {
       try { sig.vec = await microVec(doc, i); } catch {}
     }
-    sigs.push(sig);
+    sigs[i] = sig;
     if ((i & 7) === 7) await tick();
   }
   return sigs;
 }
 
-function pageSim(a, b) {
-  if (a.words >= MIN_TEXT_WORDS && b.words >= MIN_TEXT_WORDS) return jaccard(a.sh, b.sh);
-  if (a.words < MIN_TEXT_WORDS && b.words < MIN_TEXT_WORDS) return rasterSim(a.vec, b.vec);
-  return 0.15; // one page has text, the other doesn't — no plausible pair
+// raw text of every page in a side's window, in order
+function windowPageTexts(side) {
+  const d = S[side];
+  const sigs = side === "A" ? S.sigA : S.sigB;
+  const w = windowOf(side);
+  const out = [];
+  for (let i = w.from; i <= w.to; i++) {
+    let t = sigs?.[i]?.text;
+    if (t == null) { try { t = pageTextRaw(d.doc, i); } catch { t = ""; } }
+    out.push(t);
+  }
+  return out;
 }
 
 async function buildAlignment() {
-  const N = S.A.pageCount, M = S.B.pageCount;
-  // two single-page files were loaded to be compared — always pair them
+  const wa = windowOf("A"), wb = windowOf("B");
+  const N = wa.to - wa.from + 1, M = wb.to - wb.from + 1;
+  // a single page on each side was chosen to be compared — always pair them
   if (N === 1 && M === 1) {
-    S.pairs = [{ a: 0, b: 0 }];
+    S.pairs = [{ a: wa.from, b: wb.from }];
     S.sigA = S.sigB = null;
     return;
   }
   if (N * M > ALIGN_MAX_CELLS) {
     // enormous documents: fall back to index pairing
     S.pairs = Array.from({ length: Math.max(N, M) }, (_, i) => ({
-      a: i < N ? i : null,
-      b: i < M ? i : null,
+      a: i < N ? wa.from + i : null,
+      b: i < M ? wb.from + i : null,
     }));
     S.sigA = S.sigB = null;
     return;
   }
   await busy("aligning pages…");
-  S.sigA = await docSignatures(S.A.doc, N);
-  S.sigB = await docSignatures(S.B.doc, M);
-  const grid = new Float32Array(N * M);
-  for (let i = 0; i < N; i++) {
-    for (let j = 0; j < M; j++) grid[i * M + j] = pageSim(S.sigA[i], S.sigB[j]);
+  S.sigA = await docSignatures(S.A.doc, wa.from, wa.to);
+  S.sigB = await docSignatures(S.B.doc, wb.from, wb.to);
+
+  // The whole-document text diff (also what the text view shows) decides
+  // which pages correspond: page i pairs with the page that holds the words
+  // the diff aligned as unchanged. Pages with no flowing text fall back to
+  // word-bag similarity if they have a few words, or to pixels if they have none.
+  const flowA = flowDocText(windowPageTexts("A"), true);
+  const flowB = flowDocText(windowPageTexts("B"), true);
+  S.docDiff = !flowA.text && !flowB.text ? { empty: true } : docTextDiff(flowA.text, flowB.text);
+  const ov = S.docDiff.ops ? pageOverlap(S.docDiff.ops, flowA.pageOf, flowB.pageOf, N, M) : null;
+  // words of each page that the diff aligned anywhere (deleted text, e.g. an
+  // abstract that moved off the page, must not count against its page)
+  const alignedA = new Float32Array(N), alignedB = new Float32Array(M);
+  if (ov) {
+    for (let i = 0; i < N; i++) {
+      for (let j = 0; j < M; j++) { alignedA[i] += ov.counts[i * M + j]; alignedB[j] += ov.counts[i * M + j]; }
+    }
   }
-  S.pairs = alignPages(N, M, (i, j) => grid[i * M + j], MIN_PAGE_SIM);
+  const sim = (i, j) => {
+    const a = S.sigA[wa.from + i], b = S.sigB[wb.from + j];
+    if (!a.words && !b.words) return rasterSim(a.vec, b.vec);
+    if (!a.words || !b.words) return 0.15; // one page has text, the other doesn't — no plausible pair
+    let s = jaccard(a.sh, b.sh);
+    if (ov) {
+      const c = ov.counts[i * M + j];
+      if (c > 0) {
+        // share of each page's aligned words that landed on the other page,
+        // discounted when the shared run is too short to be conclusive
+        const frac = Math.min(c / alignedA[i], c / alignedB[j]);
+        s = Math.max(s, frac * Math.min(1, c / 40));
+      }
+    }
+    return s;
+  };
+  const grid = new Float32Array(N * M);
+  for (let i = 0; i < N; i++) for (let j = 0; j < M; j++) grid[i * M + j] = sim(i, j);
+  S.pairs = alignPages(N, M, (i, j) => grid[i * M + j], MIN_PAGE_SIM).map((p) => ({
+    a: p.a == null ? null : p.a + wa.from,
+    b: p.b == null ? null : p.b + wb.from,
+  }));
+  if (!ov) return;
+
+  // A page left unmatched whose text mostly lives on ONE page of the other
+  // side was merged into / split off from that page by re-pagination — not
+  // added or removed. Pair it with that page and flag the pair ("flow") so
+  // the UI can say so. Pages whose text is genuinely absent keep their
+  // status but remember where the little that matched went.
+  for (const p of S.pairs) {
+    if (p.a != null && p.b == null) {
+      const i = p.a - wa.from;
+      let bj = -1, bc = 0;
+      for (let j = 0; j < M; j++) if (ov.counts[i * M + j] > bc) { bc = ov.counts[i * M + j]; bj = j; }
+      if (bc > 0) {
+        p.found = { page: bj + wb.from, pct: Math.round(100 * alignedA[i] / Math.max(1, ov.wordsA[i])) };
+        if (alignedA[i] >= 20 && alignedA[i] >= 0.5 * ov.wordsA[i]) { p.b = bj + wb.from; p.flow = "into"; }
+      }
+    } else if (p.a == null && p.b != null) {
+      const j = p.b - wb.from;
+      let bi = -1, bc = 0;
+      for (let i = 0; i < N; i++) if (ov.counts[i * M + j] > bc) { bc = ov.counts[i * M + j]; bi = i; }
+      if (bc > 0) {
+        p.found = { page: bi + wa.from, pct: Math.round(100 * alignedB[j] / Math.max(1, ov.wordsB[j])) };
+        if (alignedB[j] >= 20 && alignedB[j] >= 0.5 * ov.wordsB[j]) { p.a = bi + wa.from; p.flow = "from"; }
+      }
+    }
+  }
 }
 
 /* ---------- compare pipeline ---------- */
@@ -328,6 +454,8 @@ async function beginCompare() {
   S.pageMax = S.pairs.length;
   S.pageIndex = 0;
   els.bar.hidden = false;
+  els.rangebar.hidden = false;
+  updateRangeBar();
   els.views.hidden = false;
   els.names.textContent = `${S.A.name} ⇄ ${S.B.name}`;
   els.names.title = els.names.textContent;
@@ -475,8 +603,9 @@ async function scanAll() {
     if (token !== S.scanToken || !S.active) return;
     let status = "same", thumb = null;
     try {
-      const { a: pa, b: pb } = S.pairs[i];
-      if (pa == null) status = "added";
+      const { a: pa, b: pb, flow } = S.pairs[i];
+      if (flow) status = "flow";
+      else if (pa == null) status = "added";
       else if (pb == null) status = "removed";
       else {
         const tA = S.sigA ? S.sigA[pa].text : pageTextRaw(S.A.doc, pa);
@@ -532,12 +661,15 @@ async function scanAll() {
 /* ---------- page strip ---------- */
 
 function pairShort(p) {
+  if (p.flow) return `${p.a + 1}↝${p.b + 1}`;
   if (p.a == null) return `+${p.b + 1}`;
   if (p.b == null) return `−${p.a + 1}`;
   return p.a === p.b ? `${p.a + 1}` : `${p.a + 1}→${p.b + 1}`;
 }
 
 function pairLong(p) {
+  if (p.flow === "into") return `old p${p.a + 1} ↝ new p${p.b + 1} (merged into it)`;
+  if (p.flow === "from") return `old p${p.a + 1} ↝ new p${p.b + 1} (split off from it)`;
   if (p.a == null) return `new page ${p.b + 1}`;
   if (p.b == null) return `old page ${p.a + 1}`;
   return p.a === p.b ? `page ${p.a + 1}` : `old p${p.a + 1} ↔ new p${p.b + 1}`;
@@ -570,11 +702,11 @@ function updateStripCell(i) {
   const b = els.strip.children[i];
   if (!b) return;
   const s = S.scan[i];
-  b.classList.remove("s-same", "s-changed", "s-added", "s-removed", "s-pending");
+  b.classList.remove("s-same", "s-changed", "s-added", "s-removed", "s-flow", "s-pending");
   b.classList.add(`s-${s.status}`);
   const label = {
     same: "unchanged", changed: "changed", added: "only in new",
-    removed: "only in old", pending: "scanning…",
+    removed: "only in old", flow: "text re-paginated", pending: "scanning…",
   }[s.status];
   b.title = `${pairLong(S.pairs[i])} — ${label}`;
   const c = b.querySelector(".pthumb");
@@ -743,23 +875,15 @@ async function setMode(mode) {
   updateLegend();
 }
 
+// usually already computed by buildAlignment; the single-page and huge-document
+// fallbacks skip alignment, so build it here on first use
 async function ensureDocDiff() {
   if (!S.docDiff) {
     await busy("reading both documents…");
     try {
-      const pagesOf = (side, sigs) => {
-        const d = S[side];
-        const out = [];
-        for (let i = 0; i < d.pageCount; i++) {
-          let t = sigs?.[i]?.text;
-          if (t == null) { try { t = pageTextRaw(d.doc, i); } catch { t = ""; } }
-          out.push(t);
-        }
-        return out;
-      };
-      const ta = flowDocText(pagesOf("A", S.sigA));
-      const tb = flowDocText(pagesOf("B", S.sigB));
-      S.docDiff = !ta.trim() && !tb.trim() ? { empty: true } : docTextDiff(ta, tb);
+      const ta = flowDocText(windowPageTexts("A"));
+      const tb = flowDocText(windowPageTexts("B"));
+      S.docDiff = !ta && !tb ? { empty: true } : docTextDiff(ta, tb);
     } finally {
       unbusy();
     }
@@ -782,9 +906,10 @@ function renderDocDiff() {
     return;
   }
   if (!d.delCount && !d.insCount) {
-    els.doctext.appendChild(span("tmuted",
-      "no text differences — after ignoring page furniture (headers, page numbers, hyphenation), the documents read identically."));
-    return;
+    els.doctext.appendChild(span("tmuted", d.movedCount
+      ? `no text edits — ${d.movedCount} words only moved (shown dotted below); page furniture is ignored. `
+      : "no text differences — after ignoring page furniture (headers, page numbers, hyphenation), the documents read identically."));
+    if (!d.movedCount) return;
   }
   const CONTEXT = 25, FOLD_MIN = 60;
   for (const o of d.ops) {
@@ -806,8 +931,14 @@ function renderDocDiff() {
     } else if (o.t === "-") {
       els.doctext.appendChild(span("tdel", o.words.join(" ")));
       els.doctext.appendChild(span("", " "));
-    } else {
+    } else if (o.t === "+") {
       els.doctext.appendChild(span("tins", o.words.join(" ")));
+      els.doctext.appendChild(span("", " "));
+    } else {
+      // relocated passage — identical text, different place
+      const el = span("tmov", o.words.join(" "));
+      el.title = o.t === "<" ? "moved away from here (text unchanged)" : "moved here (text unchanged)";
+      els.doctext.appendChild(el);
       els.doctext.appendChild(span("", " "));
     }
   }
@@ -818,19 +949,22 @@ function renderDocDiff() {
 function updateStatus() {
   if (S.mode === "text") {
     const d = S.docDiff;
+    const moved = d?.movedCount ? ` · ${d.movedCount} words moved` : "";
     els.status.textContent = !d ? ""
       : d.empty ? "no text layer in either file"
-      : !d.delCount && !d.insCount ? "whole document · no text differences"
-      : `whole document · −${d.delCount} +${d.insCount} words`;
+      : !d.delCount && !d.insCount ? `whole document · no text differences${moved}`
+      : `whole document · −${d.delCount} +${d.insCount} words${moved}`;
     return;
   }
   const e = S.cache.get(S.pageIndex);
   if (!e) { els.status.textContent = ""; return; }
   const bits = [];
   const p = S.pairs[S.pageIndex];
-  if (p.a != null && p.b != null && p.a !== p.b) bits.push(pairLong(p));
-  if (e.pa == null) bits.push("this page exists only in the new file");
-  else if (e.pb == null) bits.push("this page exists only in the old file");
+  const where = p.found ? ` (${p.found.pct}% of its words appear on ${e.pa == null ? "old" : "new"} page ${p.found.page + 1})` : "";
+  if (p.flow) bits.push(pairLong(p));
+  else if (p.a != null && p.b != null && p.a !== p.b) bits.push(pairLong(p));
+  if (e.pa == null) bits.push(`this page exists only in the new file${where}`);
+  else if (e.pb == null) bits.push(`this page exists only in the old file${where}`);
   else if (!e.regions.length && !e.text.delCount && !e.text.insCount && !e.text.overflow) {
     bits.push("no differences on this page");
   } else {
@@ -870,6 +1004,7 @@ function updateLegend() {
   if (S.mode === "text") {
     els.legend.appendChild(legendItem("sdel", "removed"));
     els.legend.appendChild(legendItem("sins", "added"));
+    els.legend.appendChild(legendItem("smov", "moved"));
     els.legend.appendChild(document.createTextNode(" headers, page numbers & hyphenation ignored"));
     return;
   }
@@ -1038,10 +1173,25 @@ window.addEventListener("drop", (e) => {
 els.swap.addEventListener("click", async () => {
   if (!S.A || !S.B) return;
   [S.A, S.B] = [S.B, S.A];
+  [S.winA, S.winB] = [S.winB, S.winA];
   invalidateCompare();
   updateSlots();
   await beginCompare();
 });
+
+els.rangeapply.addEventListener("click", applyRange);
+els.rangeall.addEventListener("click", () => {
+  S.winA = S.winB = null;
+  updateRangeBar();
+  applyRange();
+});
+for (const side of ["A", "B"]) {
+  for (const input of els.rangeIn[side]) {
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); applyRange(); }
+    });
+  }
+}
 
 els.sample.addEventListener("click", async () => {
   try {
@@ -1109,12 +1259,14 @@ els.download.addEventListener("click", () => {
   if (S.mode === "text") {
     const d = S.docDiff;
     if (!d?.ops) return;
-    let out = `# ${S.A.name} vs ${S.B.name} — whole-document word diff\n# [-removed-] {+added+} · headers, page numbers & hyphenation ignored\n\n`;
+    let out = `# ${S.A.name} vs ${S.B.name} — whole-document word diff\n# [-removed-] {+added+} [~moved away~] {~moved here~} · headers, page numbers & hyphenation ignored\n\n`;
     let col = 0;
     for (const o of d.ops) {
       const chunk = o.t === "=" ? o.words.join(" ")
         : o.t === "-" ? `[-${o.words.join(" ")}-]`
-        : `{+${o.words.join(" ")}+}`;
+        : o.t === "+" ? `{+${o.words.join(" ")}+}`
+        : o.t === "<" ? `[~${o.words.join(" ")}~]`
+        : `{~${o.words.join(" ")}~}`;
       for (const w of chunk.split(" ")) {
         if (col + w.length > 100) { out += "\n"; col = 0; }
         out += (col ? " " : "") + w;
@@ -1163,6 +1315,7 @@ window.__redacatCompare = {
   state: S,
   gotoPage: cGotoPage,
   openBytes: openSideBytes,
+  applyRange,
   show: showCompare,
   close: closeCompare,
 };

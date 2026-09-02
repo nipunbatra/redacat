@@ -272,4 +272,32 @@ trailer
   }
 }
 
+// ---- movev1.pdf / movev2.pdf: a paragraph relocates, nothing is edited ----
+// Paragraph order A, B, C becomes A, C, B (B also lands on a different page).
+// B is deliberately the shortest paragraph so the minimal edit is "B moved"
+// rather than "C moved". The text view must report a move, not a deletion
+// plus an insertion.
+{
+  const A = ["Alpha paragraph opens the report with the usual framing sentence.",
+             "It then restates the goal of the quarter in plain words."];
+  const B = ["Bravo paragraph holds the budget numbers that finance signed off on twice."];
+  const C = ["Charlie paragraph closes with next steps and the owner of each one.",
+             "Every owner confirmed their step before the report was circulated."];
+  const mk = async (order) => {
+    const { doc, font } = await newDoc();
+    let p = doc.addPage([612, 792]);
+    let y = 700, n = 0;
+    for (const para of order) {
+      for (const line of para) {
+        if (n === 3) { p = doc.addPage([612, 792]); y = 700; } // page break after 3 lines
+        p.drawText(line, { x: 72, y, size: 13, font });
+        y -= 34; n++;
+      }
+    }
+    return doc.save();
+  };
+  write("movev1.pdf", await mk([A, B, C]));
+  write("movev2.pdf", await mk([A, C, B]));
+}
+
 console.log("fixtures done.");

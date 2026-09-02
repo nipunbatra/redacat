@@ -738,19 +738,26 @@ test("ui: download disabled with zero marks, enabled after one", async () => {
 
 /* ---------- compare (PDF diff) tests ---------- */
 
-async function uploadComparePair(page, nameA, nameB) {
+async function uploadComparePaths(page, pathA, pathB) {
   await page.click("#comparelink");
-  await (await page.$("#fileA")).uploadFile(path.join(FIX, nameA));
+  await (await page.$("#fileA")).uploadFile(pathA);
   await page.waitForFunction(
     () => window.__redacatCompare?.state.A && document.getElementById("busy").hidden,
     { timeout: 120000 },
   );
-  await (await page.$("#fileB")).uploadFile(path.join(FIX, nameB));
+  await (await page.$("#fileB")).uploadFile(pathB);
   await page.waitForFunction(
     () => window.__redacatCompare?.state.B && document.getElementById("busy").hidden,
     { timeout: 120000 },
   );
 }
+const uploadComparePair = (page, nameA, nameB) =>
+  uploadComparePaths(page, path.join(FIX, nameA), path.join(FIX, nameB));
+
+const waitDocDiff = (page) => page.waitForFunction(
+  () => window.__redacatCompare.state.docDiff && document.getElementById("busy").hidden,
+  { timeout: 120000 },
+);
 
 const waitScan = (page) =>
   page.waitForFunction(() => window.__redacatCompare?.state.scanned, { timeout: 120000 });
@@ -997,6 +1004,215 @@ test("compare: text view on the standard pair shows amount change and added line
   assert(info.ins.includes("USD-275000"), `new amount added: ${info.ins}`);
   assert(info.ins.includes("ADDED-LINE-V2"), `added line present: ${info.ins}`);
   assert(info.ins.join(" ").includes("appendix page only in v2"), "added page's text shows as insertion");
+  await page.close();
+});
+
+test("compare: page ranges skip front matter, restrict the text view, and reset", async () => {
+  const { page, errors } = await newPage();
+  await uploadComparePair(page, "shiftv1.pdf", "shiftv2.pdf");
+  await waitScan(page);
+  // compare old 1–3 with new 2–4: the cover page is simply out of scope
+  await page.evaluate(() => {
+    document.getElementById("rB0").value = "2";
+    document.getElementById("rB1").value = "4";
+  });
+  await page.click("#crangeapply");
+  await waitScan(page);
+  const st = await page.evaluate(() => {
+    const S = window.__redacatCompare.state;
+    return {
+      statuses: S.scan.map((s) => s.status), pairs: S.pairs,
+      info: document.getElementById("crangeinfo").textContent,
+      labels: [...document.querySelectorAll("#cstrip .pnum")].map((e) => e.textContent),
+    };
+  });
+  assertEq(JSON.stringify(st.statuses), JSON.stringify(["same", "changed", "same"]), "no 'added' page once the cover is excluded");
+  assertEq(JSON.stringify(st.pairs), JSON.stringify([{ a: 0, b: 1 }, { a: 1, b: 2 }, { a: 2, b: 3 }]), "pairs carry absolute page numbers");
+  assertEq(JSON.stringify(st.labels), JSON.stringify(["1→2", "2→3", "3→4"]), "strip shows the absolute mapping");
+  assert(st.info.includes("old 1–3 with new 2–4"), `range info: "${st.info}"`);
+  // the text view now sees only the windowed pages
+  await page.click('#cmodes [data-mode="text"]');
+  await page.waitForFunction(
+    () => window.__redacatCompare.state.docDiff && document.getElementById("busy").hidden,
+    { timeout: 120000 },
+  );
+  const txt = await page.evaluate(() => {
+    const d = window.__redacatCompare.state.docDiff;
+    const words = (t) => d.ops.filter((o) => o.t === t).flatMap((o) => o.words);
+    return { del: words("-"), ins: words("+") };
+  });
+  assertEq(JSON.stringify(txt.del), JSON.stringify(["original"]), "text view: only the real removal");
+  assertEq(JSON.stringify(txt.ins), JSON.stringify(["revised"]), "text view: cover-page text no longer counts as added");
+  // "all pages" restores the full comparison
+  await page.click('#cmodes [data-mode="side"]');
+  await page.click("#crangeall");
+  await waitScan(page);
+  const full = await page.evaluate(() => ({
+    pairs: window.__redacatCompare.state.pairs.length,
+    info: document.getElementById("crangeinfo").textContent,
+    b0: document.getElementById("rB0").value, b1: document.getElementById("rB1").value,
+  }));
+  assertEq(full.pairs, 4, "all four pairs back");
+  assertEq(full.info, "all pages", "range info reset");
+  assert(full.b0 === "1" && full.b1 === "4", `inputs reset: ${full.b0}–${full.b1}`);
+  assertEq(errors.length, 0, `console errors: ${errors.join(" | ")}`);
+  await page.close();
+});
+
+test("compare: out-of-range page numbers are clamped, not rejected", async () => {
+  const { page } = await newPage();
+  await uploadComparePair(page, "diffv1.pdf", "diffv2.pdf");
+  await waitScan(page);
+  await page.evaluate(() => {
+    document.getElementById("rA0").value = "0";
+    document.getElementById("rA1").value = "99";
+    document.getElementById("rB0").value = "3";
+    document.getElementById("rB1").value = "2"; // end before start
+  });
+  await page.click("#crangeapply");
+  await waitScan(page);
+  const v = await page.evaluate(() => ({
+    a0: document.getElementById("rA0").value, a1: document.getElementById("rA1").value,
+    b0: document.getElementById("rB0").value, b1: document.getElementById("rB1").value,
+    pairs: window.__redacatCompare.state.pairs,
+  }));
+  assert(v.a0 === "1" && v.a1 === "3", `old range clamped to the file: ${v.a0}–${v.a1}`);
+  assert(v.b0 === "3" && v.b1 === "3", `inverted new range collapses to a single page: ${v.b0}–${v.b1}`);
+  // old 1–3 vs new page 3 only: the matching third page pairs up, the rest are removed
+  assert(v.pairs.some((p) => p.a === 2 && p.b === 2), `old p3 pairs with new p3: ${JSON.stringify(v.pairs)}`);
+  assertEq(v.pairs.filter((p) => p.b == null).length, 2, "old pages 1–2 have no counterpart in the window");
+  await page.close();
+});
+
+test("compare: text view reports a relocated paragraph as a move, not an edit", async () => {
+  const { page, errors } = await newPage();
+  await uploadComparePair(page, "movev1.pdf", "movev2.pdf");
+  await waitScan(page);
+  await page.click('#cmodes [data-mode="text"]');
+  await page.waitForFunction(
+    () => window.__redacatCompare.state.docDiff && document.getElementById("busy").hidden,
+    { timeout: 120000 },
+  );
+  const info = await page.evaluate(() => {
+    const d = window.__redacatCompare.state.docDiff;
+    const words = (t) => d.ops.filter((o) => o.t === t).flatMap((o) => o.words);
+    return {
+      del: d.delCount, ins: d.insCount, moved: d.movedCount,
+      out: words("<").join(" "), into: words(">").join(" "),
+      status: document.getElementById("cstatus").textContent,
+      movSpans: document.querySelectorAll("#cdoctext .tmov").length,
+    };
+  });
+  assertEq(info.del + info.ins, 0, `no words counted as edited: −${info.del} +${info.ins}`);
+  assertEq(info.moved, 12, `exactly the Bravo paragraph counts as moved: ${info.moved} words`);
+  assert(info.out.startsWith("Bravo paragraph") && info.into.startsWith("Bravo paragraph"), `moved text identified: "${info.out.slice(0, 40)}"`);
+  assert(info.status.includes("no text differences") && info.status.includes("words moved"), `status: "${info.status}"`);
+  assertEq(info.movSpans, 2, "moved-away and moved-here spans rendered");
+  await page.click("#cdownload");
+  const txt = (await waitDownload("movev1-vs-movev2.textdiff.txt")).toString("utf8");
+  assert(txt.includes("[~Bravo paragraph") && txt.includes("{~Bravo paragraph"), "text export marks the move");
+  assertEq(errors.length, 0, `console errors: ${errors.join(" | ")}`);
+  await page.close();
+});
+
+test("compare: ranges follow a swap, apply on Enter, and reset when a file is replaced", async () => {
+  const { page } = await newPage();
+  await uploadComparePair(page, "shiftv1.pdf", "shiftv2.pdf");
+  await waitScan(page);
+  // Enter in a range box applies it
+  await page.focus("#rB0");
+  await page.evaluate(() => { document.getElementById("rB0").value = "2"; });
+  await page.keyboard.press("Enter");
+  await waitScan(page);
+  let info = await page.$eval("#crangeinfo", (e) => e.textContent);
+  assert(info.includes("old 1–3 with new 2–4"), `Enter applied the range: "${info}"`);
+  // swapping sides carries each window with its file
+  await page.click("#cswap");
+  await waitScan(page);
+  info = await page.$eval("#crangeinfo", (e) => e.textContent);
+  assert(info.includes("old 2–4 with new 1–3"), `windows swapped with the files: "${info}"`);
+  const swapped = await page.evaluate(() => ({
+    a: document.getElementById("slotAname").textContent,
+    labels: [...document.querySelectorAll("#cstrip .pnum")].map((e) => e.textContent),
+  }));
+  assert(swapped.a.startsWith("shiftv2.pdf"), `old side is now v2: "${swapped.a}"`);
+  assertEq(JSON.stringify(swapped.labels), JSON.stringify(["2→1", "3→2", "4→3"]), "labels reflect the swapped mapping");
+  // replacing a file resets that side's window to all pages
+  await (await page.$("#fileA")).uploadFile(path.join(FIX, "diffv1.pdf"));
+  await page.waitForFunction(
+    () => window.__redacatCompare.state.A?.name === "diffv1.pdf" && window.__redacatCompare.state.scanned,
+    { timeout: 120000 },
+  );
+  const after = await page.evaluate(() => ({
+    a0: document.getElementById("rA0").value, a1: document.getElementById("rA1").value,
+    b0: document.getElementById("rB0").value, b1: document.getElementById("rB1").value,
+  }));
+  assert(after.a0 === "1" && after.a1 === "3", `replaced side compares whole: ${after.a0}–${after.a1}`);
+  assert(after.b0 === "1" && after.b1 === "3", `untouched side keeps its window: ${after.b0}–${after.b1}`);
+  await page.close();
+});
+
+// A real preprint-vs-publisher-proof pair lives in tests/private/ (gitignored:
+// it is someone's unpublished chapter). When present, the tool must reproduce
+// the findings of the hand-checked comparison summary made for its author.
+test("compare: real proof pair (local only) — page range + text view reproduce the hand-checked findings", async () => {
+  const OLD = path.join(HERE, "private", "proof-old.pdf");
+  const NEW = path.join(HERE, "private", "proof-new.pdf");
+  if (!fs.existsSync(OLD) || !fs.existsSync(NEW)) {
+    console.log("     (skipped — tests/private/proof-old.pdf / proof-new.pdf not present)");
+    return;
+  }
+  const { page, errors } = await newPage();
+  await uploadComparePaths(page, OLD, NEW);
+  await waitScan(page);
+  // the proof wraps the chapter in a metadata sheet + stub (pp. 1–2) and
+  // author queries + figure alt-text (pp. 21–23): compare the chapter body only
+  await page.evaluate(() => {
+    document.getElementById("rB0").value = "3";
+    document.getElementById("rB1").value = "20";
+  });
+  await page.click("#crangeapply");
+  await waitScan(page);
+  const st = await page.evaluate(() => {
+    const S = window.__redacatCompare.state;
+    return { statuses: S.scan.map((s) => s.status), info: document.getElementById("crangeinfo").textContent };
+  });
+  assert(st.info.includes("old 1–19 with new 3–20"), `range applied: "${st.info}"`);
+  console.log(`     real pair, page statuses: ${st.statuses.join(",")}`);
+  const unmatched = st.statuses.filter((s) => s === "removed" || s === "added").length;
+  const flows = st.statuses.filter((s) => s === "flow").length;
+  // only the preprint's first page is genuinely unmatched: its abstract left
+  // for the metadata sheet, which the range excludes
+  assert(unmatched <= 1, `at most one page without a counterpart (got ${unmatched}): ${st.statuses}`);
+  assert(flows >= 3, `pages merged/split by re-pagination read as text flow, not add/remove: ${st.statuses}`);
+  await page.evaluate(() => window.__redacatCompare.gotoPage(0));
+  const status0 = await page.$eval("#cstatus", (e) => e.textContent);
+  assert(/only in the (old|new) file \(\d+% of its words appear on/.test(status0) || status0.includes("↝"),
+    `unmatched/flow page explains where its text went: "${status0}"`);
+
+  await page.click('#cmodes [data-mode="text"]');
+  await waitDocDiff(page);
+  const t = await page.evaluate(() => {
+    const d = window.__redacatCompare.state.docDiff;
+    const words = (k) => d.ops.filter((o) => o.t === k).flatMap((o) => o.words);
+    return { del: words("-"), ins: words("+"), delCount: d.delCount, insCount: d.insCount, moved: d.movedCount };
+  });
+  console.log(`     real pair, chapter body only: −${t.delCount} +${t.insCount} words, ${t.moved} words moved`);
+  // the four "worth checking" findings from the summary
+  assert(t.del.includes("organism") && t.ins.includes("organism's"), "verb→possessive change (organism functions → organism's functions)");
+  assert(t.del.includes('"RP.".') && t.ins.includes('"RP.."'), "doubled period inside the RP quotation");
+  assert(t.del.includes("Ewald,") && t.ins.includes("Weibel"), "reference 10 author corrected to Weibel");
+  assert(t.del.includes("5th") && t.ins.includes("fifth") && t.del.includes("6th") && t.ins.includes("sixth"), "ordinals spelled out");
+  assert(t.del.includes("section") && t.ins.some((w) => w.startsWith("Sect.")), "cross-reference restyle (section → Sect.)");
+  // publisher scaffolding is out of scope thanks to the range
+  assert(!t.ins.includes("Kindly"), "author-query text excluded");
+  assert(!t.ins.includes("HolderName"), "metadata sheet excluded");
+  // relocated footnotes read as moves; the remaining volume (reference-list
+  // restyle, affiliation/copyright block, caption resets) is stable at
+  // roughly −780/+450 words — a regression would show up as a jump
+  assert(t.moved >= 100, `relocated footnotes recognized as moves: ${t.moved}`);
+  assert(t.delCount + t.insCount < 1500, `edit volume stays at the known level: −${t.delCount} +${t.insCount}`);
+  assertEq(errors.length, 0, `console errors: ${errors.join(" | ")}`);
   await page.close();
 });
 

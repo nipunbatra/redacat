@@ -44,12 +44,15 @@ and the redacted copy keeps the same encryption and password.
 Drop two versions of a PDF (or two images) and see exactly what changed —
 still fully client-side:
 
-- **Automatic page alignment** — pages are matched by content similarity
-  (hashed word shingles, with a pixel fallback for scanned pages) before
-  diffing, so an inserted cover page or extra front matter shifts the pairing
-  instead of making every later page look "changed". Unmatched pages are
-  reported as only-in-old / only-in-new, and the header notes when pages were
-  realigned.
+- **Automatic page alignment** — pages are matched before diffing, so an
+  inserted cover page or extra front matter shifts the pairing instead of
+  making every later page look "changed". The pairing is driven by the
+  whole-document text diff projected back onto pages (which page holds the
+  words the diff aligned), with word-shingle similarity as a floor and a pixel
+  fallback for pages with no text layer. Pages that re-pagination merged into
+  or split off from another page are shown *with* that page and labelled
+  `11↝12`; genuinely unmatched pages report how much of their text turned up
+  elsewhere.
 - **Side by side** — old and new rendered at the same scale, with removed
   words tinted red, added words tinted green, and changed regions outlined.
 - **Overlay** — both versions blended: red ink exists only in the old file,
@@ -68,6 +71,10 @@ still fully client-side:
   three pages worth reading.
 - A **word-level text diff** panel (built from each page's real text layer, so
   it survives reflows and font changes) plus a per-page changed-region count.
+- **Page ranges** — compare *old pages 1–19 with new pages 3–19* to skip a
+  publisher's metadata sheet, a cover page, or back-matter appendices. Every
+  view (alignment, page strip, text diff) then works on just those pages, and
+  page labels stay absolute (`1→3, 2→4…`) so the mapping is always visible.
 - **Download diff image** exports the current view as a PNG for sharing.
 
 Shortcuts: `←`/`→` flip pages; drop two files at once on the landing page to
