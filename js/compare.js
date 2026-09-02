@@ -286,11 +286,43 @@ function pageDims(doc, i) {
   return { bounds: b, pw: Math.max(1, b[2] - b[0]), ph: Math.max(1, b[3] - b[1]) };
 }
 
+// MuPDF only emits a space where the glyph gap exceeds its own threshold
+// (about 0.19 em); tightly justified lines in typeset proofs sit at ~0.14 em,
+// so whole lines come out with the words welded together. Rebuild the text
+// from glyph geometry instead and break words on any gap along the line that
+// is clearly wider than letter spacing.
+const WORD_GAP_EM = 0.1;
+
+// projected extent of a glyph quad along the line direction
+function glyphSpan(q, dir) {
+  let s = Infinity, e = -Infinity;
+  for (let k = 0; k < 8; k += 2) {
+    const p = q[k] * dir[0] + q[k + 1] * dir[1];
+    if (p < s) s = p;
+    if (p > e) e = p;
+  }
+  return { s, e };
+}
+
 function pageTextRaw(doc, i) {
   const st = doc.loadPage(i).toStructuredText();
-  const t = st.asText();
+  const out = [];
+  let line = null, prev = null, dir = null, vertical = false;
+  st.walk({
+    beginTextBlock() { if (out.length) out.push(""); },
+    beginLine(_bbox, wmode, d) { line = ""; prev = null; dir = d; vertical = wmode === 1; },
+    onChar(c, _origin, _font, size, q) {
+      if (!vertical) {
+        const { s, e } = glyphSpan(q, dir);
+        if (prev && c !== " " && prev.c !== " " && s - prev.e > WORD_GAP_EM * size) line += " ";
+        prev = { c, e };
+      }
+      line += c;
+    },
+    endLine() { out.push(line); line = null; },
+  });
   st.destroy();
-  return t;
+  return out.join("\n");
 }
 
 // tiny stretched grayscale grid — lets near-textless (scanned) pages align
@@ -535,16 +567,23 @@ async function ensurePage(i) {
 
 /* ---------- text diff ---------- */
 
-// words with united character quads, in fitz page coordinates
+// words with united character quads, in fitz page coordinates; a word also
+// ends at a glyph gap wider than letter spacing (see pageTextRaw)
 function pageWords(doc, i) {
   const st = doc.loadPage(i).toStructuredText();
   const words = [];
-  let cur = null;
+  let cur = null, prevEnd = null, dir = null, vertical = false;
   const flush = () => { if (cur && cur.s) words.push(cur); cur = null; };
   st.walk({
+    beginLine(_bbox, wmode, d) { prevEnd = null; dir = d; vertical = wmode === 1; },
     endLine: flush,
-    onChar(c, _origin, _font, _size, q) {
-      if (/\s/.test(c)) { flush(); return; }
+    onChar(c, _origin, _font, size, q) {
+      if (/\s/.test(c)) { flush(); prevEnd = null; return; }
+      if (!vertical) {
+        const { s, e } = glyphSpan(q, dir);
+        if (prevEnd != null && s - prevEnd > WORD_GAP_EM * size) flush();
+        prevEnd = e;
+      }
       const x0 = Math.min(q[0], q[2], q[4], q[6]);
       const x1 = Math.max(q[0], q[2], q[4], q[6]);
       const y0 = Math.min(q[1], q[3], q[5], q[7]);

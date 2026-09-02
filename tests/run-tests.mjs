@@ -1216,6 +1216,31 @@ test("compare: real proof pair (local only) — page range + text view reproduce
   await page.close();
 });
 
+test("compare: tightly justified text without space glyphs still diffs word by word", async () => {
+  const { page, errors } = await newPage();
+  await uploadComparePair(page, "tightv1.pdf", "tightv2.pdf");
+  await waitScan(page);
+  await page.click('#cmodes [data-mode="text"]');
+  await waitDocDiff(page);
+  const info = await page.evaluate(() => {
+    const d = window.__redacatCompare.state.docDiff;
+    const words = (t) => d.ops.filter((o) => o.t === t).flatMap((o) => o.words);
+    const e = window.__redacatCompare.state.cache.get(0);
+    return {
+      del: words("-"), ins: words("+"),
+      panel: document.getElementById("cdoctext").textContent,
+      pageWords: e.text.wordsB.length, pageDel: e.text.delCount, pageIns: e.text.insCount,
+    };
+  });
+  assertEq(JSON.stringify(info.del), JSON.stringify(["quick"]), "only the edited word removed — no welded tokens");
+  assertEq(JSON.stringify(info.ins), JSON.stringify(["swift"]), "only the edited word added");
+  assert(!/brownfox|overthe|withoutany|jumpsover/.test(info.panel), `no welded words in the text view: "${info.panel.slice(0, 120)}"`);
+  assertEq(info.pageWords, 27, "every word on the tight page is its own box");
+  assert(info.pageDel === 1 && info.pageIns === 1, `page view sees one changed word: −${info.pageDel} +${info.pageIns}`);
+  assertEq(errors.length, 0, `console errors: ${errors.join(" | ")}`);
+  await page.close();
+});
+
 test("compare: close resets state and the redaction editor still works", async () => {
   const { page } = await newPage();
   await uploadComparePair(page, "diffv1.pdf", "diffv2.pdf");

@@ -300,4 +300,41 @@ trailer
   write("movev2.pdf", await mk([A, C, B]));
 }
 
+// ---- tightv1.pdf / tightv2.pdf: tightly justified text with no space glyphs ----
+// v2 draws every word separately, 0.20 em apart, with no space characters —
+// how some typesetters emit justified lines. MuPDF's own space heuristic
+// still welds some of those words together ("foxjumps"); the app must
+// rebuild word breaks from glyph geometry, so the only reported change is
+// the one edited word (quick -> swift). (0.20 rather than a tighter gap
+// because MuPDF substitutes its own font for base-14 Helvetica, and its
+// advances differ from pdf-lib's by up to 0.06 em per glyph pair.)
+{
+  const LINES = [
+    ["The", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog", "again."],
+    ["Every", "sentence", "here", "is", "set", "without", "any", "space", "glyphs."],
+    ["Only", "one", "word", "changes", "between", "the", "two", "versions."],
+  ];
+  const mk = async (tight) => {
+    const { doc, font } = await newDoc();
+    const p = doc.addPage([612, 792]);
+    let y = 700;
+    for (const words of LINES) {
+      const ws = words.map((w) => (tight && w === "quick" ? "swift" : w));
+      if (!tight) {
+        p.drawText(ws.join(" "), { x: 72, y, size: 12, font });
+      } else {
+        let x = 72;
+        for (const w of ws) {
+          p.drawText(w, { x, y, size: 12, font });
+          x += font.widthOfTextAtSize(w, 12) + 0.20 * 12;
+        }
+      }
+      y -= 30;
+    }
+    return doc.save();
+  };
+  write("tightv1.pdf", await mk(false));
+  write("tightv2.pdf", await mk(true));
+}
+
 console.log("fixtures done.");
